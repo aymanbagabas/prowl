@@ -1577,10 +1577,14 @@ impl<'a> App<'a> {
     }
 
     /// Suspend to the shell (Ctrl-Z) and repaint on resume — the canvas may not
-    /// survive the stop, so don't rely on `resume`'s flush.
+    /// survive the stop, so don't rely on `resume`'s flush. `SIGTSTP` is Unix
+    /// job control, so elsewhere Ctrl-Z just repaints.
     fn suspend(&mut self) -> Result<()> {
-        self.screen.suspend()?;
-        self.screen.resume()?;
+        #[cfg(unix)]
+        {
+            self.screen.suspend()?;
+            self.screen.resume()?;
+        }
         self.repaint_last()
     }
 
