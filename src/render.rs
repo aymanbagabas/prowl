@@ -15,6 +15,7 @@ use crate::status;
 use uncurses::ansi::truncate::truncate as truncate_tail;
 use uncurses::buffer::TextBuffer;
 use uncurses::color::{Color, Profile};
+use uncurses::layout::Position;
 use uncurses::style::Style;
 use uncurses::text::{Encode, TextSurface};
 
@@ -355,40 +356,36 @@ pub fn paint_tabs(s: &mut impl TextSurface, view: View, ascii: bool, y: u16) -> 
     y + 1
 }
 
-/// Paint the search prompt at row `y`: an accented `/`, the query (with a block
-/// cursor while typing), and a dim match count. Returns y + 1.
+/// Paint the search prompt at row `y`: an accented `/`, the query, and a dim
+/// match count. Returns the next free row and the cell just past the query — the
+/// caret position, for the caller to park the terminal's own cursor on while the
+/// prompt is capturing (this paints no cursor of its own).
 pub fn paint_search_prompt(
     s: &mut impl TextSurface,
     query: &str,
-    searching: bool,
     matches: usize,
     ascii: bool,
     y: u16,
-) -> u16 {
+) -> (u16, Position) {
     let count = if matches == 1 {
         "1 match".to_string()
     } else {
         format!("{matches} matches")
     };
-    if ascii {
-        let cursor = if searching { "_" } else { "" };
-        s.set_str((0, y), &format!("/{query}{cursor}  ({count})"), None);
-        return y + 1;
-    }
-    let dim = Style::new().faint();
-    let p = s.set_str(
-        (0, y),
-        &format!("/{query}"),
-        status::fg(status::PEACH).bold(),
-    );
-    // A reverse-video space is the block cursor while the prompt is capturing.
-    let p = if searching {
-        s.set_str((p.x, y), " ", Style::new().reverse())
+    let prompt = format!("/{query}");
+    let style = if ascii {
+        Style::new()
     } else {
-        p
+        status::fg(status::PEACH).bold()
     };
-    s.set_str((p.x + 2, y), &format!("({count})"), &dim);
-    y + 1
+    let caret = s.set_str((0, y), &prompt, style);
+    // Two blank columns keep the count clear of the cursor's cell.
+    s.set_str(
+        (caret.x + 2, y),
+        &format!("({count})"),
+        Style::new().faint(),
+    );
+    (y + 1, caret)
 }
 
 /// Paint one indented `glyph  meaning` legend row at `y`: the glyph in `gstyle`,
@@ -495,6 +492,22 @@ mod tests {
         let mut out = Vec::new();
         canvas.encode_with(&mut out, profile).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn search_prompt_reports_the_caret_and_paints_none() {
+        let mut canvas = TextBuffer::new(40, 1);
+        let (next, caret) = paint_search_prompt(&mut canvas, "café", 1, false, 0);
+        assert_eq!(next, 1);
+        // Just past `/café` — width, not byte length.
+        assert_eq!(caret.x, 5);
+        let mut out = Vec::new();
+        canvas.encode_with(&mut out, Profile::TrueColor).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("/café"));
+        assert!(s.contains("(1 match)"));
+        // No painted stand-in cursor: nothing is reverse-video.
+        assert!(!s.contains("\x1b[7m"));
     }
 
     #[test]

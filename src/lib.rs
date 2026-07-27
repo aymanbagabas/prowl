@@ -51,6 +51,7 @@ use std::time::{Duration, Instant};
 use uncurses::buffer::{Bounded, SurfaceMut, TextBuffer};
 use uncurses::color::{Color, Profile};
 use uncurses::event::{Event, KeyCode, KeyModifiers};
+use uncurses::layout::Position;
 use uncurses::screen::Screen;
 use uncurses::style::Style;
 use uncurses::terminal::{Stdin, Stdout, Terminal};
@@ -628,7 +629,8 @@ fn title_width<const N: usize>(s: &impl TextSurface, tables: [&Option<render::Ta
 /// gates the tab strip, which is an interactive affordance. `ascii` selects
 /// letters/parens over Nerd Font glyphs/bars; colors are written as styles and
 /// downsampled by the surface's `Profile` at encode/render time. Returns the
-/// number of rows used.
+/// number of rows used and, while the search prompt is capturing, where the
+/// terminal's own cursor should rest.
 fn paint_dashboard(
     s: &mut impl TextSurface,
     sections: &Sections,
@@ -637,7 +639,7 @@ fn paint_dashboard(
     error: &str,
     footer: Option<(&str, bool)>,
     ascii: bool,
-) -> u16 {
+) -> (u16, Option<Position>) {
     let mut y = 0u16;
     if footer.is_some() {
         y = render::paint_tabs(s, ui.view, ascii, y) + 1;
@@ -651,9 +653,14 @@ fn paint_dashboard(
     // previous part by one blank row (the body's trailing blank serves as the
     // first).
     let mut painted = false;
+    let mut caret = None;
     if !ui.search.is_empty() || ui.searching {
         let matches = nav::targets(ui.view, sections, &ui.search).len();
-        y = render::paint_search_prompt(s, &ui.search, ui.searching, matches, ascii, y);
+        let (next, at) = render::paint_search_prompt(s, &ui.search, matches, ascii, y);
+        y = next;
+        // Only while the prompt is capturing: with the filter merely applied,
+        // the line is a static reminder and the cursor stays hidden.
+        caret = ui.searching.then_some(at);
         painted = true;
     }
     if !error.is_empty() {
@@ -676,7 +683,7 @@ fn paint_dashboard(
         }
         y = render::paint_help(s, ui.view, ascii, y);
     }
-    y
+    (y, caret)
 }
 
 /// A safe upper bound on the dashboard height, used to size a surface before it
@@ -717,6 +724,7 @@ fn paint_loading(screen: &mut Screen<Stdin, Stdout>) -> Result<()> {
 /// Size an inline/alternate `Screen` to the dashboard's content height, paint it,
 /// crop to the height actually used, and render. Shared by the watch redraw and
 /// the interactive one-shot frame so the sizing dance lives in one place.
+/// Returns the search caret's resting cell, if the prompt is capturing.
 fn render_dashboard(
     screen: &mut Screen<Stdin, Stdout>,
     sections: &Sections,
@@ -725,16 +733,22 @@ fn render_dashboard(
     error: &str,
     footer: Option<(&str, bool)>,
     ascii: bool,
-) -> Result<()> {
+) -> Result<Option<Position>> {
     let w = screen.width().max(1);
     // Grow tall enough to paint everything, paint, then shrink to the height
     // actually used so the surface is exactly the dashboard's line count.
     screen.resize((w, height_bound(sections, ui).max(1)));
     screen.clear();
-    let used = paint_dashboard(screen, sections, ui, changes, error, footer, ascii);
+    let (used, caret) = paint_dashboard(screen, sections, ui, changes, error, footer, ascii);
     screen.resize((w, used.max(1)));
+    // Steer the terminal's own cursor to the prompt, so the search line gets a
+    // real (blinking, shape-honoring) cursor instead of a painted stand-in.
+    match caret {
+        Some(pos) => screen.set_cursor_position(pos),
+        None => screen.clear_cursor_position(),
+    }
     screen.render()?;
-    Ok(())
+    Ok(caret)
 }
 
 /// Render the dashboard once into an offscreen [`TextBuffer`] sized to its content,
@@ -755,7 +769,8 @@ fn render_once(
 
     let w = render::MAX_WIDTH as u16;
     let mut canvas = TextBuffer::new(w, height_bound(sections, &ui));
-    let used = paint_dashboard(&mut canvas, sections, &ui, changes, "", footer, ascii);
+    // One-shot output never searches, so there is no caret to place.
+    let (used, _) = paint_dashboard(&mut canvas, sections, &ui, changes, "", footer, ascii);
     canvas.resize(w, used.max(1));
 
     // A closed downstream pipe (`prowl --once | head`) is a clean exit, not an
@@ -1273,6 +1288,10 @@ struct App<'a> {
     /// screen. The watch starts inline and enters the alt screen once the first
     /// fetch lands (or immediately when there's a cache to paint).
     in_alt: bool,
+    /// Whether the terminal cursor is currently shown. `show_cursor`/
+    /// `hide_cursor` always emit, so track the state and only toggle on a
+    /// change — the cursor is shown solely while the search prompt captures.
+    cursor_shown: bool,
 }
 
 impl<'a> App<'a> {
@@ -1312,6 +1331,7 @@ impl<'a> App<'a> {
             refreshing: false,
             armed: false,
             in_alt: false,
+            cursor_shown: false,
         };
 
         // If the very first paint fails, restore the terminal before bailing
@@ -1365,7 +1385,7 @@ impl<'a> App<'a> {
         let good = self.last_good.as_ref().unwrap_or(&Sections::EMPTY);
         let mut buf = None;
         let sections = self.ui.shown(good, &mut buf);
-        render_dashboard(
+        let caret = render_dashboard(
             &mut self.screen,
             sections,
             &self.ui,
@@ -1373,7 +1393,19 @@ impl<'a> App<'a> {
             &self.last_error,
             Some((self.eta.as_str(), self.refreshing)),
             self.cli.ascii,
-        )
+        )?;
+        // Reveal the cursor only once it's parked in the prompt, so it never
+        // blinks at a stale cell.
+        let want = caret.is_some();
+        if want != self.cursor_shown {
+            if want {
+                self.screen.show_cursor()?;
+            } else {
+                self.screen.hide_cursor()?;
+            }
+            self.cursor_shown = want;
+        }
+        Ok(())
     }
 
     /// Drive the watch: loop fetch → paint → wait, returning `Ok(())` when the
@@ -1680,7 +1712,7 @@ mod tests {
     /// Paint a dashboard onto an offscreen buffer and read it back as plain text.
     fn body(sections: &Sections, ui: &Ui) -> String {
         let mut canvas = TextBuffer::new(render::MAX_WIDTH as u16, 64);
-        let used = paint_dashboard(
+        let (used, _) = paint_dashboard(
             &mut canvas,
             sections,
             ui,
