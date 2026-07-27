@@ -7,19 +7,30 @@ model, or workflow change.
 ## What prowl is
 
 A small terminal dashboard that watches a GitHub repo and re-renders on an
-interval: **My open PRs → Merge Queue → My merged PRs → My Shipments**, then a
-`r refresh (every 5m) - ? help` footer (which also shows the refresh
-interval) and an optional help legend last at the bottom. It rings the
-terminal bell when one of your PRs merges or
-an open PR's status changes, and flags the changed rows. The interactive watch
-runs on the [**uncurses**](https://github.com/aymanbagabas/uncurses) toolkit with
-an event loop: it shows an *inline* `Loading...` frame, then enters the
-**alternate screen** [`Screen`] once the first fetch lands (or immediately when
-there's a cache to paint). Interactive `--once` uses an *inline* `Screen` instead:
-a `Loading...` frame while the fetch runs (abortable
-with `q`), then the dashboard is left in the terminal. Piped/non-TTY/`--demo`
-output is plain text printed straight to stdout, so the dashboard stays
-pipe-friendly and URLs can be OSC-8 hyperlinks.
+interval. It has two **views**, toggled with **Tab** (and chosen for one-shot
+output with `--view`):
+
+- **Mine** (default): **My open PRs → Merge Queue → My merged PRs → My
+  Shipments**.
+- **Reviews**: **Reviews** (open PRs awaiting / under my review, each with a
+  per-row review-state glyph) **→ Reviewed & merged** (merged PRs I reviewed).
+
+Below the active view is a `r refresh (every 5m) - tab switch view - enter open -
+/ search - ? help` footer (which also shows the refresh interval, and reads `r
+refreshing` while a fetch is in flight), an optional search prompt, and an
+optional help legend last at the bottom. While watching, the very top shows a
+`my PRs / reviews` tab strip with the active view accented. It rings the terminal
+bell when one of your PRs merges or an open PR's status changes, and flags the
+changed rows (the bell and change markers track the Mine view only). The
+interactive watch runs on the
+[**uncurses**](https://github.com/aymanbagabas/uncurses) toolkit with an event
+loop: it shows an *inline* `Loading...` frame, then enters the **alternate
+screen** [`Screen`] once the first fetch lands (or immediately when there's a
+cache to paint). Interactive `--once` uses an *inline* `Screen` instead: a
+`Loading...` frame while the fetch runs (abortable with `q`), then the dashboard
+is left in the terminal. Piped/non-TTY/`--demo` output is plain text printed
+straight to stdout, so the dashboard stays pipe-friendly and URLs can be OSC-8
+hyperlinks.
 
 ## Golden rules
 
@@ -53,38 +64,84 @@ pipe-friendly and URLs can be OSC-8 hyperlinks.
 (painting the dashboard onto a surface, encoding the one-shot frame, and the
 watch event loop); everything else is testable modules:
 
-- `cli.rs` — clap derive CLI, `Section` enum, duration parser (`s/m/h/d/w`).
+- `cli.rs` — clap derive CLI, `Section` enum, `View` (Mine/Reviews, `--view`,
+  `.toggle()`), `ReviewScope` (Direct/All, `--review-scope`, `.qualifier()`),
+  duration parser (`s/m/h/d/w`), and the `WATCH_KEYS` `after_help` block
+  documenting the interactive watch-mode keys.
 - `github.rs` — `Client` (HTTP `graphql()`/`get()`), `Repo`, `me()`,
   `default_branch()`, `detect_repo()` (parses the git `origin` remote),
   `parse_graphql()`.
 - `auth.rs` — device-flow login + token storage (keyring/file).
-- `model.rs` — serde structs + `fetch_*` for the three queries; query strings.
+- `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
+  the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
+  two aliased searches, `requested:` + `reviewed:`) and `fetch_reviewed_merged`
+  (reuses `merged_query`, now carrying `author`).
 - `status.rs` — **the** palette: `Status`, `status_style` (returns a glyph +
-  `Color`), glyphs/ASCII, `derive_status` (precedence), `fail_count`; and the
+  `Color`), glyphs/ASCII, `derive_status` (precedence), `fail_count`; the
   `mergeStateStatus` helpers `state_style`, `state_label` (DIRTY → CONFLICTS),
-  `state_glyph`, `state_meaning`. `fg(Color)` builds the foreground `Style`.
+  `state_glyph`, `state_meaning`; and the Reviews-view `ReviewState` (Awaiting/
+  ReReview/Updated/Reviewed) with `review_style`/`review_glyph`/`review_ascii`/
+  `review_meaning` and `REVIEW_ORDER`. `fg(Color)` builds the foreground `Style`.
 - `render.rs` — the surface painters: `paint_table`/`paint_header`/`paint_dim`/
-  `paint_footer`/`paint_help` write onto any `&mut impl TextSurface` using the
-  surface's own `str_width` (no in-house width math) and `set_str` (column gaps
-  are implicit — unpainted cells stay blank, so no padding is emitted). `Cell`
-  (text + `Style`, the OSC-8 link folded into the style) / `Table`, `truncate`
-  (uncurses' width-aware truncator), and `title_width` (cap/align the shared
-  `TITLE` column so every table lines up and the whole view stays within
-  `MAX_WIDTH` = 120). Headers, the key-hint footer (carrying the refresh
-  interval), and the help legend live here too.
+  `paint_footer`/`paint_tabs`/`paint_search_prompt`/`paint_help` write onto any
+  `&mut impl TextSurface` using the surface's own `str_width` (no in-house width
+  math) and `set_str` (column gaps are implicit — unpainted cells stay blank, so
+  no padding is emitted). `Cell` (text + `Style`, the OSC-8 link folded into the
+  style) / `Table`, `truncate` (uncurses' width-aware truncator), and
+  `title_width` (cap/align the shared `TITLE` column so every table lines up and
+  the whole view stays within `MAX_WIDTH` = 120). Headers (with an optional dim
+  count badge and trailing note — the queue ETA), the `tabs` view-switcher strip,
+  the leading-column markers (`change_marker`, and the `select_marker` navigation
+  caret that overrides it on the selected row), the key-hint footer (carrying the
+  refresh interval and the `enter open` / `/ search` hints), the search prompt
+  line (the `/` query with a block cursor + match count), and the help legend
+  (`paint_help(view, …)` — a movement-keys line then, contextual: status glyphs +
+  every `STATE` value for Mine, review glyphs + the merged glyph for Reviews)
+  live here too, plus `render_table` (paint one table to a string, for tests).
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
   Each row's PR number is the OSC-8 link (no separate URL column); the queue
-  columns are `# PR TITLE AUTHOR` (author truncated to `AUTHOR_WIDTH`).
+  columns are `# PR TITLE AUTHOR WAIT BUILD` (author truncated to
+  `AUTHOR_WIDTH`), where `WAIT` is how long the entry has been queued (now −
+  `enqueuedAt`) and `BUILD` is how long its speculative merge commit has been
+  building — now − the earliest check-run `startedAt` in the commit's
+  `statusCheckRollup.contexts` (`QueueEntryNode::build_started_at`), or `—` until
+  a check actually starts running (still queued, or no speculative commit /
+  checks). The rollup is a single flat connection (cheap, and front-loads the
+  real check runs, unlike `checkSuites` whose first entries are app
+  integrations). The `Merge Queue` header also carries the queue-level ETA
+  (`~11m to merge`, from `mergeQueue.nextEntryEstimatedTimeToMerge`) as a dim
+  note. The
+  merged columns are `# PR TITLE RELEASE MERGED`, where `RELEASE` is the release
+  that shipped the PR (a link to its release page) or `—` if not yet shipped,
+  looked up from the `commits::ReleaseMap`.
+- `reviews.rs` — the Reviews view's rows/tables. `ReviewRow` (open: `glyph PR
+  TITLE AUTHOR UPDATED`, glyph = the `ReviewState`) via `build_open_rows`
+  (de-dupes the two searches, derives the state, sorts by state rank then
+  `updatedAt`) + `open_to_table`; `ReviewedMergedRow` (`glyph PR TITLE AUTHOR
+  MERGED`) via `build_merged_rows` + `merged_to_table`.
 - `commits.rs` — "commits by me" counts for the next (unreleased) version and
   the last 4 stable releases (GitHub releases + compare REST APIs); best-effort,
-  never fatal. Rendered as the right-aligned "My Shipments" section. Each label
-  is a link — `upcoming` to the compare log (last tag → default branch), each
-  release tag to its release page. Beneath each, it lists my PRs (number parsed
-  from each commit subject's trailing `(#NNN)`, the squash / merge-commit
-  convention) **filtered to those still in the recently-merged set**, so it
-  cross-references where my recent merges landed.
+  never fatal. `fetch` returns both the `CommitStats` (rendered as the "My
+  Shipments" section: one left-aligned labelled count per bucket, each label a
+  link — `upcoming` to the compare log (last tag → default branch), each release
+  tag to its release page, with each shipped release's relative publish age in a
+  trailing dim column) and a `ReleaseMap` (PR number → the release that
+  shipped it, parsed from each commit subject's trailing `(#NNN)`, the squash /
+  merge-commit convention) that annotates the merged section's `RELEASE` column.
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
-- `changes.rs` — `Tracker`/`Changes`: bell + highlight detection.
+- `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
+- `nav.rs` — watch-mode row navigation + search: `targets(view, &Sections,
+  query)` is the open URL of every navigable row matching `query` in render
+  order (PR rows → the PR; shipments → the release / compare log; url-less rows
+  skipped), `filter(&Sections, query)` clones the matching rows for rendering
+  (same per-row haystack — number/title/author/tag — so rows and targets stay in
+  lockstep), `moved` advances the selection cursor by a `nav::Move` (the
+  input-agnostic movement type — `lib.rs::classify` maps keys onto it; lazy:
+  `None` until the first move, `Bottom` enters at the last row), and `clamp`
+  keeps it in range after a refresh.
+- `open.rs` — `open::url` opens a URL in the default browser via the platform
+  opener (`open` / `xdg-open` / `cmd /C start`), spawned detached; rejects
+  non-`http(s)` URLs; no new dep.
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
@@ -121,9 +178,14 @@ every path — a clean quit, a `?`-operator error, or a failed first paint (`sta
 calls `stop` itself before bailing). Each frame is painted by `redraw` →
 `render_dashboard`, which **resizes the surface to the exact content height**
 (even in the alternate screen) before `render`. The loop uses `poll_event` with
-the interval as the timeout. Keys are matched with `Key::matches`: `r`/`R` refresh
-now, `?` toggles help, `q`/`Esc`/`Ctrl-C` quit, `Ctrl-Z` suspends/resumes,
-`Resize` repaints.
+the interval as the timeout. Keys are classified into an `Action` (or, while the
+search prompt is open, a `SearchAction`) with `Key::matches`, which is
+**case-sensitive** — bindings must list both cases (`["r", "R"]`). `r`/`R`
+refresh now, `Tab` switches view, `?` toggles help, `/` opens search, `Enter`
+opens the selected row, the movement keys drive the cursor, `q`/`Q`/`Ctrl-C`
+quit (`Esc` clears the filter, or quits when there is none), `Ctrl-Z`
+suspends/resumes, `Resize` repaints. All watch UI state lives in one `Ui` struct
+(view, help, selection, search).
 
 ## Key behaviors
 
@@ -131,12 +193,49 @@ now, `?` toggles help, `q`/`Esc`/`Ctrl-C` quit, `Ctrl-Z` suspends/resumes,
   Check suites with **zero check runs** (`checkRuns.totalCount == 0`) are
   phantom and ignored for both the glyph and the `FAIL` count, matching GitHub's
   rollup (so a `CLEAN` PR stays green).
-- **Sorting:** open and merged PRs by `updatedAt` desc; queue by `position` asc.
+- **Sorting:** open PRs by `updatedAt` desc, merged PRs by `mergedAt` desc;
+  queue by `position` asc. Reviews by review-state rank (Awaiting → ReReview →
+  Updated → Reviewed) then `updatedAt` desc; reviewed-and-merged by `mergedAt` desc.
+- **Queue dedup:** a PR of mine that's in the merge queue is shown only in the
+  Merge Queue section, not the open-PRs list (`prs::without_queued`, applied when
+  the queue section is shown so `--only mine` still lists it).
+- **Views / Tab:** two views, `Mine` (default) and `Reviews`, selected for
+  one-shot output with `--view` and toggled live with `Tab`. While watching,
+  prowl fetches **both** views every refresh so Tab switches instantly from
+  `last_good` (no refetch); `--once`/piped fetches only the selected view. A
+  top tab strip marks the active view.
+- **Review state:** each open review row is `Awaiting` (requested, not yet
+  reviewed by me), `ReReview` (requested again after I reviewed), `Updated` (I
+  reviewed; last commit `committedDate` > my latest review `submittedAt`), or
+  `Reviewed`. `--review-scope` picks the requested search: `all` →
+  `review-requested:<me>` (me + my teams, default), `direct` →
+  `user-review-requested:<me>` (only me). Both review searches exclude my own
+  PRs (`-author:<me>`).
 - **Bell:** rings once per refresh when a PR of mine merges or an open PR's
   status changes (keyed by PR number, so re-sorting / new PRs / title edits do
-  not ring). The first refresh is silent. Changed rows get a `▸` marker.
+  not ring). The first refresh is silent. Changed rows get a `▸` marker. Bell
+  and change markers track the **Mine** view only (the Reviews view conveys
+  state through its per-row glyph instead).
 - **Resilience:** a failed API call keeps the last good data, shows a dim error
   line, and does not ring.
+- **Navigation / open:** a lazy selection cursor (`nav`, watch only) — `None`
+  until the first movement key, then a `select_marker` caret on the chosen row
+  (it overrides the change marker, and works in the custom shipments painter
+  too). `j`/`k` (or the arrows) move one row, `g`/`G` jump to first/last,
+  `Ctrl-D`/`Ctrl-U` half a page (sized from the screen's `window_cells`); Enter
+  opens the selected row — the PR, or a shipments release / the upcoming compare
+  log — via `open::url`. Every row across all sections of the active view is one
+  target (`nav::targets`, in render order); switching views drops the cursor and
+  a refresh `clamp`s it. `--once`/piped output has no selection.
+- **Search / filter:** `/` opens a search prompt (`Ui.searching`); typing filters
+  the rows live (case-insensitive substring over number/title/author/release
+  tag), Enter applies the filter and returns to the list, Esc (or a lone Esc from
+  the list) clears it — and with no filter to clear, Esc quits. While the prompt
+  is open every keystroke is text (`classify_search`), else keys are normal-mode
+  actions (`classify`). `nav::filter` produces the rendered rows and
+  `nav::targets(…, query)` the navigable ones from the **same** predicate, so the
+  caret/open track the visible matches; the cursor resets on each edit. Watch
+  mode only.
 - **Cache:** on a watch start, prowl paints the cached `Sections` immediately
   (entering the alt screen straight away), seeds change-detection from it
   so the first live refresh highlights what changed while prowl wasn't running,
@@ -145,20 +244,24 @@ now, `?` toggles help, `q`/`Esc`/`Ctrl-C` quit, `Ctrl-Z` suspends/resumes,
   `--no-cache` skips both read and write.
 - **Terminal:** the watch runs on a `uncurses::Screen` in the alternate screen
   with the cursor hidden; raw mode means stray keystrokes never garble the
-  dashboard or spill into the shell. `r`/`R` forces a refresh now; `?` toggles
-  the help legend (a full static reference of every status glyph + `STATE` value,
-  hidden by default, rendered last at the very bottom; `--no-help` only affects
-  one-shot/piped output); `q`/`Esc`/`Ctrl-C` quit and `Ctrl-Z` suspends/resumes.
-  The only persistent bottom line is the footer
-  (`r refresh (every 5m) - ? help`), which carries the refresh interval; a
-  failed refresh adds a dim `error: …` line above it. Every fetch (and the
-  one-time `me`/default-branch resolution) runs on a **detached background
-  thread** and returns over a channel; the main thread only polls input and
-  paints, so network I/O never blocks the UI — `?`/resize/suspend stay live
-  mid-refresh and **quit is instant** (a quit abandons the in-flight request,
-  which is reaped at process exit). The terminal is restored on every exit path
-  by `App::stop` (`Screen::finish`), which the caller always runs after
-  `App::run`.
+  dashboard or spill into the shell. `r`/`R` forces a refresh now; `Tab` switches
+  view; `?` toggles the help legend (contextual to the active view — status
+  glyphs + `STATE` values for Mine, review glyphs for Reviews — hidden by
+  default, rendered last at the very bottom; `--no-help` only affects
+  one-shot/piped output). The movement keys (`j`/`k`, arrows, `g`/`G`,
+  `Ctrl-D`/`Ctrl-U`) drive the selection cursor, Enter opens it, and `/` filters.
+  `q`/`Q`/`Ctrl-C` quit (as does `Esc` with no filter applied) and `Ctrl-Z`
+  suspends/resumes. The only persistent bottom line is the footer
+  (`r refresh (every 5m) - tab switch view - enter open - / search - ? help`),
+  which carries the refresh interval; a failed refresh adds a dim `error: …` line
+  above it. While a fetch is in flight the footer reads `r refreshing` with the
+  `r` glyph dimmed. Every fetch (and the one-time `me`/default-branch resolution)
+  runs on a **detached background thread** and returns over a channel; the main
+  thread only polls input and paints, so network I/O never blocks the UI —
+  navigation, search, `Tab`, `?`, resize and suspend stay live mid-refresh and
+  **quit is instant** (a quit abandons the in-flight request, which is reaped at
+  process exit). The terminal is restored on every exit path by `App::stop`
+  (`Screen::finish`), which the caller always runs after `App::run`.
 - **Interactive `--once`:** `run_once_interactive` brings up an *inline* `Screen`
   (raw mode, hidden cursor) and paints a `Loading...` frame while the fetch runs on
   a background thread, so keystrokes don't echo and `q`/`Esc`/`Ctrl-C` aborts the
@@ -166,14 +269,26 @@ now, `?` toggles help, `q`/`Esc`/`Ctrl-C` quit, `Ctrl-Z` suspends/resumes,
   the terminal; on abort the frame is wiped. `Screen::finish` restores the terminal
   on every path. Piped/non-TTY output keeps the plain `render_once` encode path.
 
-## The three GraphQL queries + REST (see `model.rs` / `commits.rs`)
+## The GraphQL queries + REST (see `model.rs` / `commits.rs`)
 
-- Merge queue: `repository.mergeQueue.entries` (vars `owner`, `name`).
+- Merge queue: `repository.mergeQueue.entries` (vars `owner`, `name`), each
+  entry carrying `enqueuedAt` (WAIT) and `headCommit.statusCheckRollup.contexts`
+  check-run `startedAt` timestamps (BUILD = now − the earliest), plus the
+  queue-level `nextEntryEstimatedTimeToMerge` (the header ETA).
 - Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
   `mergeStateStatus`, `mergeQueueEntry`, last commit `checkSuites { conclusion
   checkRuns { totalCount } }`, `updatedAt`.
-- Merged: `search(is:pr is:merged author:<me> merged:>=<since>)` with `mergedAt`,
-  `updatedAt`, `baseRefName`.
+- Merged: `search(is:pr is:merged author:<me> merged:>=<since>)` with `mergedAt`
+  (fetched `sort:updated-desc`, since search can't sort by merge time, then
+  re-sorted by `mergedAt` for display). Now also fetches `author` (used by the
+  reviewed-and-merged section; the Mine merged section ignores it).
+- Reviews (one POST, two aliased searches): `requested: search(is:pr is:open
+  <scope>:<me> -author:<me>)` and `reviewed: search(is:pr is:open
+  reviewed-by:<me> -author:<me>)`, each node carrying `author`, last commit
+  `committedDate`, and `reviews(author:<me>)` `submittedAt`s. Re-review = a PR
+  in both result sets.
+- Reviewed & merged: `search(is:pr is:merged reviewed-by:<me> -author:<me>
+  merged:>=<since>)` (reuses the merged query/limit).
 - Commits section: REST `GET /repos/.../releases`, `/compare/a...b`, `/commits`.
 
 ## Build / test / lint
@@ -185,11 +300,17 @@ cargo fmt --all --check                      # must be formatted
 cargo test                                   # offline, fixture-based
 ```
 
+`lib.rs` opts the crate into `#![warn(clippy::pedantic)]` with a curated block of
+`#![allow(...)]`s (each justified) for the lints that are noise for a small
+bin-plus-test-lib — so `clippy -D warnings` still runs pedantic and new pedantic
+findings fail CI.
+
 The hidden `--demo` flag (synthetic data for screenshots) is behind the
 off-by-default `demo` cargo feature, so release builds don't ship it. Build or
 run it with `cargo run --features demo -- --demo`.
 
-CI (`.github/workflows/build.yml`) runs fmt/clippy/build/test on push and PRs.
+CI (`.github/workflows/build.yml`) runs fmt/clippy/build/test (the `build` job)
+and `cargo audit` for dependency advisories (the `audit` job) on push and PRs.
 
 ## Releases
 

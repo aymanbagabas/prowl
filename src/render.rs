@@ -10,11 +10,13 @@
 //! time — so piped output (a `Disabled` profile) degrades to plain text with no
 //! special-casing here.
 
+use crate::cli::View;
 use crate::status;
 use uncurses::ansi::truncate::truncate as truncate_tail;
-use uncurses::color::Color;
+use uncurses::buffer::TextBuffer;
+use uncurses::color::{Color, Profile};
 use uncurses::style::Style;
-use uncurses::text::TextSurface;
+use uncurses::text::{Encode, TextSurface};
 
 /// The whole dashboard is kept within this many display columns; the flexible
 /// title column is truncated (with an ellipsis) to make every table fit.
@@ -186,6 +188,26 @@ pub fn paint_table(
     top + 1 + table.rows.len() as u16
 }
 
+/// Paint `table` alone onto an offscreen buffer and encode it to a string,
+/// either styled (SGR + OSC-8) or plain. A convenience for checking a single
+/// section's output without standing up a whole dashboard.
+#[must_use]
+pub fn render_table(table: &Table, styled: bool) -> String {
+    let height = table.rows.len() as u16 + 1;
+    let mut buf = TextBuffer::new(MAX_WIDTH as u16, height);
+    let title_w = title_width(&buf, &[table]);
+    paint_table(&mut buf, table, title_w, false, 0);
+    let mut out = Vec::new();
+    let profile = if styled {
+        Profile::TrueColor
+    } else {
+        Profile::Disabled
+    };
+    buf.encode_with(&mut out, profile)
+        .expect("encoding to a Vec cannot fail");
+    String::from_utf8(out).expect("uncurses encodes valid UTF-8")
+}
+
 /// Paint a dim one-liner (an empty-section placeholder, the error line) at row
 /// `y`. Returns y + 1.
 pub fn paint_dim(s: &mut impl TextSurface, msg: &str, y: u16) -> u16 {
@@ -193,32 +215,40 @@ pub fn paint_dim(s: &mut impl TextSurface, msg: &str, y: u16) -> u16 {
     y + 1
 }
 
-/// Paint a section header at row `y`: a colored bold accent bar, the title, and
-/// an optional dim count badge (or `Title (count)` in ASCII mode). Returns y + 1.
+/// Paint a section header at row `y`: a colored bold accent bar, the title, an
+/// optional dim count badge (or `Title (count)` in ASCII mode), and an optional
+/// dim trailing note (e.g. the merge-queue ETA). Returns y + 1.
 pub fn paint_header(
     s: &mut impl TextSurface,
     title: &str,
     accent: Color,
     count: Option<&str>,
+    note: Option<&str>,
     ascii: bool,
     y: u16,
 ) -> u16 {
-    if ascii {
+    let dim = Style::new().faint();
+    let mut end = if ascii {
         let text = match count {
             Some(c) => format!("{title} ({c})"),
             None => title.to_string(),
         };
-        s.set_str((0, y), &text, None);
+        s.set_str((0, y), &text, None)
     } else {
         let end = s.set_str(
             (0, y),
             &format!("\u{258c} {title}"),
             status::fg(accent).bold(),
         );
-        if let Some(c) = count {
-            s.set_str((end.x + 2, y), c, Style::new().faint());
+        match count {
+            Some(c) => s.set_str((end.x + 2, y), c, &dim),
+            None => end,
         }
+    };
+    if let Some(n) = note {
+        end = s.set_str((end.x + 2, y), n, &dim);
     }
+    let _ = end;
     y + 1
 }
 
@@ -241,26 +271,123 @@ pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     }
 }
 
+/// The selection caret for the row the navigation cursor is on. It sits in the
+/// same leading column as the change marker, overriding it when a row is both
+/// changed and selected.
+pub fn select_marker(ascii: bool) -> Cell {
+    let m = if ascii { ">" } else { "\u{276f}" };
+    Cell::styled(m, status::fg(status::PEACH).bold())
+}
+
 /// Paint the watch-mode key-hint footer at row `y`, folding the constant
-/// refresh interval into the refresh hint: `r refresh (every 5m) - ? help`. Each
-/// key glyph is a bold muted accent, its labels dim; plain in ASCII mode.
-/// Returns y + 1.
-pub fn paint_footer(s: &mut impl TextSurface, interval: &str, ascii: bool, y: u16) -> u16 {
-    if ascii {
-        s.set_str(
-            (0, y),
-            &format!("r refresh (every {interval}) - ? help"),
-            None,
-        );
+/// refresh interval into the refresh hint: `r refresh (every 5m) - tab switch
+/// view - enter open - / search - ? help`. While a refresh is in flight the
+/// first hint becomes `r refreshing` (the interval is dropped and the `r` glyph
+/// is dimmed, since `r` is inert until the fetch finishes). Each key glyph is a
+/// bold muted accent, its labels dim; plain in ASCII mode. Returns y + 1.
+pub fn paint_footer(
+    s: &mut impl TextSurface,
+    interval: &str,
+    refreshing: bool,
+    ascii: bool,
+    y: u16,
+) -> u16 {
+    let refresh = if refreshing {
+        "refreshing".to_string()
     } else {
-        let key = status::fg(status::OVERLAY).bold();
-        let dim = Style::new().faint();
-        let p = s.set_str((0, y), "r", &key);
-        let p = s.set_str((p.x + 1, y), &format!("refresh (every {interval})"), &dim);
-        let p = s.set_str((p.x, y), " - ", &dim);
-        let p = s.set_str((p.x, y), "?", &key);
-        s.set_str((p.x + 1, y), "help", &dim);
+        format!("refresh (every {interval})")
+    };
+    let hints = [
+        ("r", refresh.as_str()),
+        ("tab", "switch view"),
+        ("enter", "open"),
+        ("/", "search"),
+        ("?", "help"),
+    ];
+    if ascii {
+        let line = hints
+            .iter()
+            .map(|(k, l)| format!("{k} {l}"))
+            .collect::<Vec<_>>()
+            .join(" - ");
+        s.set_str((0, y), &line, None);
+        return y + 1;
     }
+    let key = status::fg(status::OVERLAY).bold();
+    let dim = Style::new().faint();
+    let mut x = 0u16;
+    for (i, (k, label)) in hints.iter().enumerate() {
+        if i > 0 {
+            x = s.set_str((x, y), " - ", &dim).x;
+        }
+        // `r` is inert while a fetch is in flight, so its glyph fades to dim.
+        let kstyle = if i == 0 && refreshing { &dim } else { &key };
+        let p = s.set_str((x, y), k, kstyle);
+        x = s.set_str((p.x + 1, y), label, &dim).x;
+    }
+    y + 1
+}
+
+/// Paint the view switcher at row `y`: both view names, the active one accented
+/// with a section-style bar, the other dim (the active one is bracketed in ASCII
+/// mode). Returns y + 1.
+pub fn paint_tabs(s: &mut impl TextSurface, view: View, ascii: bool, y: u16) -> u16 {
+    let names = [(View::Mine, "my PRs"), (View::Reviews, "reviews")];
+    let bar = status::fg(status::LAVENDER).bold();
+    let dim = Style::new().faint();
+    let mut x = 0u16;
+    for (v, n) in names {
+        let active = v == view;
+        x = if ascii {
+            let text = if active {
+                format!("[{n}]")
+            } else {
+                n.to_string()
+            };
+            s.set_str((x, y), &text, None).x
+        } else if active {
+            s.set_str((x, y), &format!("\u{258c}{n}"), &bar).x
+        } else {
+            s.set_str((x, y), n, &dim).x
+        };
+        x += 2;
+    }
+    y + 1
+}
+
+/// Paint the search prompt at row `y`: an accented `/`, the query (with a block
+/// cursor while typing), and a dim match count. Returns y + 1.
+pub fn paint_search_prompt(
+    s: &mut impl TextSurface,
+    query: &str,
+    searching: bool,
+    matches: usize,
+    ascii: bool,
+    y: u16,
+) -> u16 {
+    let count = if matches == 1 {
+        "1 match".to_string()
+    } else {
+        format!("{matches} matches")
+    };
+    if ascii {
+        let cursor = if searching { "_" } else { "" };
+        s.set_str((0, y), &format!("/{query}{cursor}  ({count})"), None);
+        return y + 1;
+    }
+    let dim = Style::new().faint();
+    let p = s.set_str(
+        (0, y),
+        &format!("/{query}"),
+        status::fg(status::PEACH).bold(),
+    );
+    // A reverse-video space is the block cursor while the prompt is capturing.
+    let p = if searching {
+        s.set_str((p.x, y), " ", Style::new().reverse())
+    } else {
+        p
+    };
+    s.set_str((p.x + 2, y), &format!("({count})"), &dim);
     y + 1
 }
 
@@ -278,37 +405,75 @@ fn legend_row(
     s.set_str((p.x + 2, y), meaning, dim);
 }
 
-/// Paint the help legend at row `top`: a complete reference of every status
-/// glyph and every `mergeStateStatus` value. Returns the next free row.
-pub fn paint_help(s: &mut impl TextSurface, ascii: bool, top: u16) -> u16 {
+/// Paint the help legend for `view` at row `top`: the navigation keys, then only
+/// the glyphs and values that view actually uses, so a glyph the other view
+/// reuses for something else can't muddy it. The Mine view lists the status
+/// glyphs + every `mergeStateStatus` value; the Reviews view lists the
+/// review-state glyphs + the merged glyph (its only shared icon). Returns the
+/// next free row.
+pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -> u16 {
     let dim = Style::new().faint();
-    let mut y = paint_header(s, "Help", status::OVERLAY, None, ascii, top);
+    let mut y = paint_header(s, "Help", status::OVERLAY, None, None, ascii, top);
 
-    for st in status::ORDER {
-        let glyph = status::glyph(st, ascii).to_string();
-        let color = status::fg(status::status_style(st).1);
-        legend_row(s, &glyph, color, status::status_meaning(st), &dim, y);
-        y += 1;
-    }
-    s.set_str((2, y), "- no checks reported yet", &dim);
+    // The footer only lists the action keys, so document the movement cursor here.
+    let sep = if ascii { " | " } else { "  \u{b7}  " };
+    let keys =
+        format!("j/k move{sep}g/G first/last{sep}^D/^U half page{sep}enter open{sep}/ filter");
+    s.set_str((2, y), &keys, &dim);
     y += 1;
 
-    for st in status::STATE_ORDER {
-        let meaning = status::state_meaning(st);
-        let c = status::state_style(st);
-        if ascii {
-            // Label form (matches the ASCII/piped STATE column).
-            let p = s.set_str((2, y), status::state_label(st), c);
-            if !meaning.is_empty() {
-                s.set_str((p.x, y), &format!(" \u{2014} {meaning}"), &dim);
+    match view {
+        View::Mine => {
+            for st in status::ORDER {
+                let glyph = status::glyph(st, ascii).to_string();
+                let color = status::fg(status::status_style(st).1);
+                legend_row(s, &glyph, color, status::status_meaning(st), &dim, y);
+                y += 1;
             }
-        } else {
-            // Glyph form (matches the Nerd Font STATE column).
-            legend_row(s, &status::state_glyph(st).to_string(), c, meaning, &dim, y);
+            s.set_str((2, y), "- no checks reported yet", &dim);
+            y += 1;
+
+            for st in status::STATE_ORDER {
+                let meaning = status::state_meaning(st);
+                let c = status::state_style(st);
+                if ascii {
+                    // Label form (matches the ASCII/piped STATE column).
+                    let p = s.set_str((2, y), status::state_label(st), c);
+                    if !meaning.is_empty() {
+                        s.set_str((p.x, y), &format!(" \u{2014} {meaning}"), &dim);
+                    }
+                } else {
+                    // Glyph form (matches the Nerd Font STATE column).
+                    legend_row(s, &status::state_glyph(st).to_string(), c, meaning, &dim, y);
+                }
+                y += 1;
+            }
         }
-        y += 1;
+        View::Reviews => {
+            for r in status::REVIEW_ORDER {
+                let glyph = status::review_glyph(r, ascii).to_string();
+                let color = status::fg(status::review_style(r).1);
+                legend_row(s, &glyph, color, status::review_meaning(r), &dim, y);
+                y += 1;
+            }
+            // The "Reviewed & merged" section leads each row with the merged glyph.
+            let merged = status::Status::Merged;
+            let glyph = status::glyph(merged, ascii).to_string();
+            let color = status::fg(status::status_style(merged).1);
+            legend_row(s, &glyph, color, status::status_meaning(merged), &dim, y);
+            y += 1;
+        }
     }
     y
+}
+
+/// The number of legend rows [`paint_help`] paints for `view` (header + the key
+/// line + one row per entry), so callers can size a surface before painting.
+pub fn help_height(view: View) -> usize {
+    2 + match view {
+        View::Mine => status::ORDER.len() + 1 + status::STATE_ORDER.len(),
+        View::Reviews => status::REVIEW_ORDER.len() + 1,
+    }
 }
 
 #[cfg(test)]
@@ -364,13 +529,7 @@ mod tests {
             paint_table(b, &table, 0, true, 0);
         });
         let lines: Vec<&str> = out.split("\r\n").collect();
-        let col = |line: &str| {
-            line.find('#')
-                .map(|i| &line[..i])
-                .unwrap_or("")
-                .chars()
-                .count()
-        };
+        let col = |line: &str| line.find('#').map_or("", |i| &line[..i]).chars().count();
         // The "#" starts at the same display column on both rows.
         assert_eq!(col(lines[1]), col(lines[2]));
     }
@@ -415,13 +574,22 @@ mod tests {
 
     #[test]
     fn footer_is_plain_or_styled_key_hints() {
-        let plain = encode(40, 1, Profile::Disabled, |b| {
-            paint_footer(b, "5m", true, 0);
+        let plain = encode(80, 1, Profile::Disabled, |b| {
+            paint_footer(b, "5m", false, true, 0);
         });
-        assert_eq!(plain, "r refresh (every 5m) - ? help");
+        assert_eq!(
+            plain,
+            "r refresh (every 5m) - tab switch view - enter open - / search - ? help"
+        );
 
-        let styled = encode(40, 1, Profile::TrueColor, |b| {
-            paint_footer(b, "5m", false, 0);
+        // While a refresh is in flight the first hint says so instead.
+        let refreshing = encode(80, 1, Profile::Disabled, |b| {
+            paint_footer(b, "5m", true, true, 0);
+        });
+        assert!(refreshing.starts_with("r refreshing"));
+
+        let styled = encode(80, 1, Profile::TrueColor, |b| {
+            paint_footer(b, "5m", false, false, 0);
         });
         assert!(styled.contains("refresh (every 5m)"));
         assert!(styled.contains("help"));

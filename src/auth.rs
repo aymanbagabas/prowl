@@ -74,7 +74,7 @@ fn device_flow(interactive: bool) -> Result<String> {
     }
     eprintln!();
     eprintln!("  Authorize prowl:");
-    eprintln!("    1. open {}", style.styled(&dc.verification_uri));
+    eprintln!("    1. open {style}{}{style:#}", dc.verification_uri);
     eprintln!("    2. enter the code:  {}", dc.user_code);
     eprintln!();
     eprintln!("  Waiting for authorization...");

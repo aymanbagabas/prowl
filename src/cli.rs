@@ -5,11 +5,28 @@ use clap::{Parser, ValueEnum};
 use std::str::FromStr;
 use std::time::Duration;
 
+/// The interactive watch-mode key bindings, appended to `--help`. They aren't
+/// flags, so clap wouldn't list them otherwise; the running dashboard shows the
+/// same keys in its footer and `?` legend.
+const WATCH_KEYS: &str = "\
+Keys (while watching):
+  j / k            move the selection (also Down / Up arrows)
+  g / G            jump to the first / last row
+  Ctrl-D / Ctrl-U  move the selection half a page
+  Enter            open the selected PR or release in your browser
+  /                filter by number / title / author / release tag
+  Esc              clear the filter
+  r                refresh now
+  Tab              switch view (your PRs / your reviews)
+  ?                toggle the help legend
+  Ctrl-C           quit";
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "prowl",
     version,
-    about = "A tiny terminal radar for your GitHub pull requests."
+    about = "A tiny terminal radar for your GitHub pull requests.",
+    after_help = WATCH_KEYS
 )]
 pub struct Cli {
     /// Repository to watch, as owner/name. Auto-detected from the cwd if omitted.
@@ -48,6 +65,16 @@ pub struct Cli {
     #[arg(long)]
     pub include_pre_releases: bool,
 
+    /// Which view to show first, toggled with Tab while watching: your PRs
+    /// (open, queue, merged, shipments) or your code reviews.
+    #[arg(long, value_enum, default_value_t = View::Mine, value_name = "VIEW")]
+    pub view: View,
+
+    /// In the Reviews view, whose requested reviews to include: only PRs that
+    /// request you directly, or also those requesting a team you belong to.
+    #[arg(long, value_enum, default_value_t = ReviewScope::All, value_name = "SCOPE")]
+    pub review_scope: ReviewScope,
+
     /// Hide the help legend in one-shot/piped output (in the watch view it
     /// starts hidden and is toggled with `?`).
     #[arg(long)]
@@ -74,6 +101,44 @@ pub enum Section {
     Mine,
     Merged,
     Shipments,
+}
+
+/// The two dashboard views, toggled with Tab while watching.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum View {
+    /// Your PRs: open, merge queue, merged, shipments.
+    Mine,
+    /// Code reviews: PRs to review, and merged PRs you reviewed.
+    Reviews,
+}
+
+impl View {
+    /// The other view (for the Tab toggle).
+    pub fn toggle(self) -> View {
+        match self {
+            View::Mine => View::Reviews,
+            View::Reviews => View::Mine,
+        }
+    }
+}
+
+/// Which requested reviews to include in the Reviews view.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ReviewScope {
+    /// Only PRs that request your review directly.
+    Direct,
+    /// PRs that request your review directly or via a team you belong to.
+    All,
+}
+
+impl ReviewScope {
+    /// The GitHub search qualifier for the "requesting my review" search.
+    pub fn qualifier(self) -> &'static str {
+        match self {
+            ReviewScope::Direct => "user-review-requested",
+            ReviewScope::All => "review-requested",
+        }
+    }
 }
 
 impl Cli {
@@ -135,8 +200,7 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
     let split = s
         .char_indices()
         .find(|(_, c)| c.is_ascii_alphabetic())
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
+        .map_or(s.len(), |(i, _)| i);
     let (num, unit) = s.split_at(split);
     let n: u64 = num
         .parse()

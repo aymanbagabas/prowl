@@ -2,9 +2,9 @@
 //! responses are parsed through the same path the binary uses, then turned into
 //! rows and rendered. No network access.
 
-use prowl::model::{MergedData, MineData, QueueData};
-use prowl::status::Status;
-use prowl::{github, merged, prs, queue, render};
+use prowl::model::{MergedData, MineData, QueueData, ReviewsData};
+use prowl::status::{ReviewState, Status};
+use prowl::{github, merged, prs, queue, render, reviews};
 use std::collections::HashSet;
 
 fn parse<T: serde::de::DeserializeOwned>(json: &str) -> T {
@@ -43,6 +43,17 @@ fn queue_null_and_empty_both_yield_no_rows() {
 }
 
 #[test]
+fn queue_next_eta_parses_and_defaults_to_none() {
+    let populated: QueueData = parse(include_str!("fixtures/queue_populated.json"));
+    assert_eq!(prowl::model::queue_next_eta(&populated), Some(660));
+    // A null queue or one without the field yields no estimate.
+    let null: QueueData = parse(include_str!("fixtures/queue_null.json"));
+    let empty: QueueData = parse(include_str!("fixtures/queue_empty.json"));
+    assert_eq!(prowl::model::queue_next_eta(&null), None);
+    assert_eq!(prowl::model::queue_next_eta(&empty), None);
+}
+
+#[test]
 fn queue_styled_render_uses_palette_and_links() {
     use uncurses::buffer::TextBuffer;
     use uncurses::color::Profile;
@@ -64,6 +75,34 @@ fn queue_styled_render_uses_palette_and_links() {
     // URLs are OSC-8 hyperlinks carrying a per-URL `id=` param.
     assert!(out.contains("\x1b]8;id="));
     assert!(out.contains(";https://github.com/octo/repo/pull/101\x1b\\"));
+    // Wait/build columns are present; the entry whose checks are all still
+    // queued (no `startedAt`) shows a dash.
+    assert!(out.contains("WAIT"));
+    assert!(out.contains("BUILD"));
+    assert!(out.contains('\u{2014}'));
+}
+
+#[test]
+fn queue_build_time_is_earliest_check_run_start() {
+    let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
+    let rows = queue::build_rows(model_queue_nodes(data), "caarlos0");
+
+    // #101 (pos 1): earliest check-run start across its suites (ignoring the
+    // empty / null / not-yet-started ones).
+    assert_eq!(rows[0].number, 101);
+    assert_eq!(
+        rows[0].build_started_at.as_deref(),
+        Some("2026-06-19T11:58:00Z")
+    );
+    // #102 (pos 2): the earlier of its two suite starts.
+    assert_eq!(rows[1].number, 102);
+    assert_eq!(
+        rows[1].build_started_at.as_deref(),
+        Some("2026-06-19T11:59:00Z")
+    );
+    // #103 (pos 3): its only run hasn't started -> no build time.
+    assert_eq!(rows[2].number, 103);
+    assert!(rows[2].build_started_at.is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -159,14 +198,15 @@ fn mine_partial_null_surfaces_graphql_error() {
 #[test]
 fn merged_parses_sorts_desc_and_caps() {
     let data: MergedData = parse(include_str!("fixtures/merged.json"));
-    let rows = merged::build_rows(data.search.nodes, 4);
+    let rows = merged::build_rows(data.search.nodes, 4, &Default::default());
 
     assert_eq!(rows.len(), 4); // capped at the limit
-    // Most recently updated first.
+    // Most recently merged first.
     assert_eq!(rows[0].number, 6649);
-    assert_eq!(rows[0].base, "main");
-    // Strictly descending update timestamps.
-    let ts: Vec<&Option<String>> = rows.iter().map(|r| &r.updated_at).collect();
+    // No release map supplied, so nothing is annotated as shipped.
+    assert!(rows[0].release.is_none());
+    // Strictly descending merge timestamps.
+    let ts: Vec<&Option<String>> = rows.iter().map(|r| &r.merged_at).collect();
     assert!(ts.windows(2).all(|w| w[0] >= w[1]));
 }
 
@@ -174,6 +214,63 @@ fn merged_parses_sorts_desc_and_caps() {
 fn merged_empty_yields_no_rows() {
     let data: MergedData = parse(include_str!("fixtures/merged_empty.json"));
     assert!(data.search.nodes.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Reviews (PRs to review + reviewed-and-merged)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reviews_parse_dedupe_and_derive_states() {
+    let data: ReviewsData = parse(include_str!("fixtures/reviews.json"));
+    let rows = reviews::build_open_rows(data);
+
+    // #102 is in both searches (a re-review) -> de-duplicated to four rows,
+    // ordered by state rank: Awaiting, ReReview, Updated, Reviewed.
+    assert_eq!(
+        rows.iter().map(|r| (r.number, r.state)).collect::<Vec<_>>(),
+        vec![
+            (101, ReviewState::Awaiting),
+            (102, ReviewState::ReReview),
+            (103, ReviewState::Updated),
+            (104, ReviewState::Reviewed),
+        ]
+    );
+    // #101 has a null author -> "ghost".
+    assert_eq!(rows[0].author, "ghost");
+}
+
+#[test]
+fn reviews_open_render_uses_palette_and_links() {
+    let data: ReviewsData = parse(include_str!("fixtures/reviews.json"));
+    let rows = reviews::build_open_rows(data);
+    let out = render::render_table(&reviews::open_to_table(&rows, false), true);
+    // The Awaiting glyph is yellow (#f9e2af); PR numbers are OSC-8 hyperlinks
+    // carrying a per-URL `id=` param.
+    assert!(out.contains("38;2;249;226;175"), "expected awaiting yellow");
+    assert!(out.contains("\x1b]8;id="));
+    assert!(out.contains(";https://github.com/octo/repo/pull/101\x1b\\"));
+}
+
+#[test]
+fn reviews_ascii_state_letters() {
+    let data: ReviewsData = parse(include_str!("fixtures/reviews.json"));
+    let rows = reviews::build_open_rows(data);
+    let table = reviews::open_to_table(&rows, true); // ascii
+    // Column 0 is the margin; column 1 is the review-state glyph.
+    let st: Vec<&str> = table.rows.iter().map(|r| r[1].text.as_str()).collect();
+    assert_eq!(st, vec!["a", "@", "^", "v"]); // awaiting, re-review, updated, reviewed
+}
+
+#[test]
+fn reviewed_merged_parses_sorts_desc_with_author() {
+    let data: MergedData = parse(include_str!("fixtures/reviewed_merged.json"));
+    let rows = reviews::build_merged_rows(data.search.nodes, 10);
+    // Most recently merged first; author is carried through.
+    assert_eq!(rows[0].number, 201);
+    assert_eq!(rows[0].author, "erin");
+    assert_eq!(rows[1].number, 202);
+    assert_eq!(rows[1].author, "frank");
 }
 
 // `model::queue_nodes` takes ownership; a tiny shim keeps the call sites tidy.

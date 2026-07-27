@@ -3,6 +3,7 @@
 use crate::model::QueueEntryNode;
 use crate::render::{self, Cell, Table};
 use crate::status::{self, BLUE, YELLOW};
+use crate::timefmt;
 use uncurses::style::Style;
 
 /// Queue author logins are truncated to this many display columns.
@@ -16,6 +17,11 @@ pub struct QueueRow {
     pub title: String,
     pub url: String,
     pub mine: bool,
+    /// When the entry joined the queue (WAIT = now - this).
+    pub enqueued_at: Option<String>,
+    /// When the speculative merge commit started building (BUILD = now - this);
+    /// `None` when the entry isn't building yet.
+    pub build_started_at: Option<String>,
 }
 
 /// Build rows ordered by queue position ascending; `mine` flags own PRs.
@@ -23,11 +29,11 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
     let mut rows: Vec<QueueRow> = nodes
         .into_iter()
         .map(|n| {
+            let build_started_at = n.build_started_at();
             let author = n
                 .pull_request
                 .author
-                .map(|a| a.login)
-                .unwrap_or_else(|| "ghost".to_string());
+                .map_or_else(|| "ghost".to_string(), |a| a.login);
             QueueRow {
                 position: n.position,
                 number: n.pull_request.number,
@@ -35,6 +41,8 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
                 author,
                 title: n.pull_request.title,
                 url: n.pull_request.url,
+                enqueued_at: n.enqueued_at,
+                build_started_at,
             }
         })
         .collect();
@@ -45,34 +53,37 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
 pub fn to_table(rows: &[QueueRow], ascii: bool) -> Table {
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        let author = render::truncate(&r.author, AUTHOR_WIDTH, ascii);
-        let row = if r.mine {
-            // Mine: position, PR link, and author all share one highlight style,
-            // passed by reference (`Cell` takes `impl Into<Style>`, so `&Style`
-            // converts at the boundary).
+        // Mine: position, PR link, author, and the wait/build ages all share
+        // one highlight style, passed by reference (`Cell` takes
+        // `impl Into<Style>`, so `&Style` converts at the boundary).
+        let (meta, pr, title) = if r.mine {
             let hi = status::fg(YELLOW).bold();
-            vec![
-                Cell::plain(" "),
-                Cell::styled(r.position.to_string(), &hi),
-                render::Cell::pr(r.number, r.url.clone(), &hi),
-                Cell::styled(r.title.clone(), Style::new().bold()),
-                Cell::styled(author, &hi),
-            ]
+            (hi.clone(), hi, Style::new().bold())
         } else {
-            vec![
-                Cell::plain(" "),
-                Cell::styled(r.position.to_string(), Style::new().faint()),
-                render::Cell::pr(r.number, r.url.clone(), status::fg(BLUE)),
-                Cell::styled(r.title.clone(), None),
-                Cell::styled(author, None),
-            ]
+            (Style::new().faint(), status::fg(BLUE), Style::new())
         };
-        out.push(row);
+        let author_style = if r.mine { &meta } else { &title };
+        let author = render::truncate(&r.author, AUTHOR_WIDTH, ascii);
+        let wait = timefmt::age_of(r.enqueued_at.as_deref());
+        // No check has started running yet (queued, or no speculative commit).
+        let build = match r.build_started_at.as_deref() {
+            Some(ts) => timefmt::age_of(Some(ts)),
+            None => "\u{2014}".to_string(),
+        };
+        out.push(vec![
+            Cell::plain(" "),
+            Cell::styled(r.position.to_string(), &meta),
+            render::Cell::pr(r.number, r.url.clone(), pr),
+            Cell::styled(r.title.clone(), &title),
+            Cell::styled(author, author_style),
+            Cell::styled(wait, &meta),
+            Cell::styled(build, &meta),
+        ]);
     }
     Table {
         // A leading (always-blank) marker column keeps the queue aligned with
         // the Open PRs and Merged PRs tables, which lead with the change marker.
-        header: vec!["", "#", "PR", "TITLE", "AUTHOR"],
+        header: vec!["", "#", "PR", "TITLE", "AUTHOR", "WAIT", "BUILD"],
         rows: out,
     }
 }
@@ -80,11 +91,13 @@ pub fn to_table(rows: &[QueueRow], ascii: bool) -> Table {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Login, QueuePr};
+    use crate::model::{Login, QueueCommit, QueueContext, QueueContexts, QueuePr, QueueRollup};
 
     fn node(position: i64, number: i64, login: &str) -> QueueEntryNode {
         QueueEntryNode {
             position,
+            enqueued_at: None,
+            head_commit: None,
             pull_request: QueuePr {
                 number,
                 title: format!("PR {number}"),
@@ -93,6 +106,23 @@ mod tests {
                     login: login.to_string(),
                 }),
             },
+        }
+    }
+
+    /// A speculative merge commit whose rollup checks started at the given times
+    /// (`None` = a context with no start, e.g. a legacy status or a queued run).
+    fn commit(starts: &[Option<&str>]) -> QueueCommit {
+        QueueCommit {
+            status_check_rollup: Some(QueueRollup {
+                contexts: QueueContexts {
+                    nodes: starts
+                        .iter()
+                        .map(|s| QueueContext {
+                            started_at: s.map(str::to_string),
+                        })
+                        .collect(),
+                },
+            }),
         }
     }
 
@@ -115,5 +145,44 @@ mod tests {
         let rows = build_rows(vec![n], "caarlos0");
         assert_eq!(rows[0].author, "ghost");
         assert!(!rows[0].mine);
+    }
+
+    #[test]
+    fn build_time_is_earliest_check_run_start() {
+        let mut n = node(1, 1, "caarlos0");
+        n.enqueued_at = Some("2026-06-19T11:50:00Z".to_string());
+        // Checks started well after the entry was enqueued; BUILD tracks the
+        // earliest run start, not the enqueue time.
+        n.head_commit = Some(commit(&[
+            Some("2026-06-19T12:05:00Z"),
+            Some("2026-06-19T12:00:00Z"),
+            Some("2026-06-19T12:10:00Z"),
+        ]));
+        let rows = build_rows(vec![n], "caarlos0");
+        assert_eq!(rows[0].enqueued_at.as_deref(), Some("2026-06-19T11:50:00Z"));
+        assert_eq!(
+            rows[0].build_started_at.as_deref(),
+            Some("2026-06-19T12:00:00Z")
+        );
+    }
+
+    #[test]
+    fn build_time_empty_until_a_check_starts() {
+        // No speculative commit yet -> no build time.
+        let rows = build_rows(vec![node(1, 1, "caarlos0")], "caarlos0");
+        assert!(rows[0].build_started_at.is_none());
+
+        // A commit whose checks are all still queued (no `startedAt`) also has
+        // no build time...
+        let mut queued = node(2, 2, "caarlos0");
+        queued.head_commit = Some(commit(&[None, None]));
+        let rows = build_rows(vec![queued], "caarlos0");
+        assert!(rows[0].build_started_at.is_none());
+
+        // ...and both render as a dash in the BUILD column.
+        let out = render::render_table(&to_table(&rows, true), false);
+        assert!(out.contains("WAIT"));
+        assert!(out.contains("BUILD"));
+        assert!(out.contains('\u{2014}'));
     }
 }
