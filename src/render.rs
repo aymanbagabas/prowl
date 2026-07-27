@@ -190,14 +190,15 @@ pub fn paint_table(
 }
 
 /// Paint `table` alone onto an offscreen buffer and encode it to a string,
-/// either styled (SGR + OSC-8) or plain. A convenience for checking a single
-/// section's output without standing up a whole dashboard.
+/// either styled (SGR + OSC-8) or plain. Plain output implies ASCII mode, as it
+/// does for the dashboard. A convenience for checking a single section's output
+/// without standing up a whole dashboard.
 #[must_use]
 pub fn render_table(table: &Table, styled: bool) -> String {
     let height = table.rows.len() as u16 + 1;
     let mut buf = TextBuffer::new(MAX_WIDTH as u16, height);
     let title_w = title_width(&buf, &[table]);
-    paint_table(&mut buf, table, title_w, false, 0);
+    paint_table(&mut buf, table, title_w, !styled, 0);
     let mut out = Vec::new();
     let profile = if styled {
         Profile::TrueColor
