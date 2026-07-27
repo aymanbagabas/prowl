@@ -94,7 +94,9 @@ watch event loop); everything else is testable modules:
   the leading-column markers (`change_marker`, and the `select_marker` navigation
   caret that overrides it on the selected row), the key-hint footer (carrying the
   refresh interval and the `enter open` / `/ search` hints), the search prompt
-  line (the `/` query with a block cursor + match count), and the help legend
+  line (the `/` query + match count; it paints no cursor and instead *returns*
+  the caret cell, so the watch can park the terminal's real one there), and the
+  help legend
   (`paint_help(view, …)` — a movement-keys line then, contextual: status glyphs +
   every `STATE` value for Mine, review glyphs + the merged glyph for Reviews)
   live here too, plus `render_table` (paint one table to a string, for tests).
@@ -234,8 +236,13 @@ suspends/resumes, `Resize` repaints. All watch UI state lives in one `Ui` struct
   is open every keystroke is text (`classify_search`), else keys are normal-mode
   actions (`classify`). `nav::filter` produces the rendered rows and
   `nav::targets(…, query)` the navigable ones from the **same** predicate, so the
-  caret/open track the visible matches; the cursor resets on each edit. Watch
-  mode only.
+  caret/open track the visible matches; the selection resets on each edit. The
+  prompt uses the **terminal's own cursor**: `paint_search_prompt` returns the
+  caret cell, `paint_dashboard` passes it up only while `searching`, and
+  `render_dashboard` stages it with `Screen::set_cursor_position` (declarative —
+  `render` re-applies it every frame) or `clear_cursor_position`. `App` tracks
+  `cursor_shown` and only calls `show_cursor`/`hide_cursor` on a transition,
+  since both always emit DECTCEM. Watch mode only.
 - **Cache:** on a watch start, prowl paints the cached `Sections` immediately
   (entering the alt screen straight away), seeds change-detection from it
   so the first live refresh highlights what changed while prowl wasn't running,
@@ -243,7 +250,7 @@ suspends/resumes, `Resize` repaints. All watch UI state lives in one `Ui` struct
   `Loading...` frame and enters the alt screen only once the first fetch lands.
   `--no-cache` skips both read and write.
 - **Terminal:** the watch runs on a `uncurses::Screen` in the alternate screen
-  with the cursor hidden; raw mode means stray keystrokes never garble the
+  with the cursor hidden (it reappears only in the search prompt); raw mode means stray keystrokes never garble the
   dashboard or spill into the shell. `r`/`R` forces a refresh now; `Tab` switches
   view; `?` toggles the help legend (contextual to the active view — status
   glyphs + `STATE` values for Mine, review glyphs for Reviews — hidden by
