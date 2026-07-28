@@ -32,6 +32,9 @@ pub enum Wait {
     Search,
     /// A lone `Esc`: clear an applied search filter.
     Cancel,
+    /// The terminal was resized, or we resumed from Ctrl-Z: repaint in place
+    /// (the pinned frame is sized from the terminal, so it has gone stale).
+    Redraw,
 }
 
 /// A keystroke while the search prompt is open (raw text input, unlike the
@@ -46,6 +49,8 @@ pub enum SearchKey {
     Enter,
     /// Esc: clear the filter and leave the prompt.
     Esc,
+    /// The terminal was resized, or we resumed from Ctrl-Z: repaint in place.
+    Redraw,
     /// The interval elapsed with no input: do a scheduled refresh.
     Tick,
 }
@@ -55,16 +60,22 @@ mod imp {
     use std::cmp::Ordering;
     use std::io::IsTerminal;
     use std::os::fd::AsRawFd;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
     use super::{SearchKey, Wait};
 
-    use crate::render::{HIDE_CURSOR, SHOW_CURSOR};
+    use crate::render::{ENTER_SCREEN, LEAVE_SCREEN};
 
-    // The terminal state to restore, shared so the Ctrl-C handler — which exits
+    // The terminal state to restore, shared so the signal handler — which exits
     // via `process::exit`, skipping destructors — can put it back too.
     static SAVED: Mutex<Option<(i32, libc::termios)>> = Mutex::new(None);
+
+    // Set by the SIGWINCH (resize) and SIGCONT (resume) handlers: the painted
+    // frame is sized from the terminal, so both invalidate it. Consumed by the
+    // input poll, which turns it into a repaint.
+    static REDRAW: AtomicBool = AtomicBool::new(false);
 
     // Terminal state captured for the Ctrl-Z (SIGTSTP) / resume (SIGCONT)
     // handlers. Set once from `quiet`, then only read, so the handlers can reach
@@ -101,35 +112,44 @@ mod imp {
         set_handler(libc::SIGTSTP, on_tstp);
     }
 
-    /// Ctrl-Z: show the cursor and restore the shell's terminal mode, then let
-    /// the default SIGTSTP actually stop us. `SIGTSTP` is masked for the duration
-    /// of this handler, so the re-raised signal is delivered (with the default
-    /// disposition) once we return — stopping the process cleanly.
+    /// Ctrl-Z: hand the terminal back — leave the alternate screen, restore
+    /// autowrap and the cursor, and put the shell's terminal mode back — then
+    /// let the default SIGTSTP actually stop us. `SIGTSTP` is masked for the
+    /// duration of this handler, so the re-raised signal is delivered (with the
+    /// default disposition) once we return — stopping the process cleanly.
     extern "C" fn on_tstp(_sig: libc::c_int) {
         if let Some(s) = SUSPEND.get() {
             unsafe {
                 libc::tcsetattr(s.fd, libc::TCSANOW, &s.original);
-                raw_write(SHOW_CURSOR);
+                raw_write(LEAVE_SCREEN);
                 libc::signal(libc::SIGTSTP, libc::SIG_DFL);
                 libc::raise(libc::SIGTSTP);
             }
         }
     }
 
-    /// Resume (`fg`): re-arm the suspend handler, re-quiet stdin, and hide the
-    /// cursor again so the dashboard picks up where it left off.
+    /// Resume (`fg`): re-arm the suspend handler, re-quiet stdin, and take the
+    /// screen back. The alternate screen comes back blank, so flag a redraw —
+    /// the input poll turns that into a repaint of the current frame.
     extern "C" fn on_cont(_sig: libc::c_int) {
         if let Some(s) = SUSPEND.get() {
             arm_tstp();
             unsafe {
                 libc::tcsetattr(s.fd, libc::TCSANOW, &s.quiet);
             }
-            raw_write(HIDE_CURSOR);
+            raw_write(ENTER_SCREEN);
+            REDRAW.store(true, AtomicOrdering::Relaxed);
         }
     }
 
-    /// Install the Ctrl-Z / resume handlers that keep the cursor in sync. Called
-    /// once, after `quiet` has captured the terminal modes.
+    /// Resize: the pinned frame is laid out for the old size, so ask for a
+    /// repaint. Just an atomic store — the poll does the actual work.
+    extern "C" fn on_winch(_sig: libc::c_int) {
+        REDRAW.store(true, AtomicOrdering::Relaxed);
+    }
+
+    /// Install the Ctrl-Z / resume handlers that hand the screen back and take
+    /// it again. Called once, after `quiet` has captured the terminal modes.
     fn install_suspend(fd: i32, original: libc::termios, quiet: libc::termios) {
         if SUSPEND
             .set(Suspend {
@@ -179,8 +199,10 @@ mod imp {
             SAVED.lock().unwrap().take();
             return None;
         }
-        // Keep the cursor visible in the shell if the user suspends with Ctrl-Z.
+        // Give the shell a usable terminal back if the user suspends with Ctrl-Z.
         install_suspend(fd, term, quiet);
+        // A resize invalidates the pinned frame's layout; repaint on the next poll.
+        set_handler(libc::SIGWINCH, on_winch);
         Some(QuietInput)
     }
 
@@ -194,21 +216,37 @@ mod imp {
         }
     }
 
+    /// What a poll of stdin produced.
+    enum Input {
+        /// `n` bytes were read into the caller's buffer.
+        Bytes(usize),
+        /// A resize or a resume: the frame needs repainting, no key was pressed.
+        Redraw,
+        /// The deadline passed (or stdin can't be read): time to refresh.
+        Timeout,
+    }
+
     /// Poll stdin until it's readable or `deadline` elapses, then read once.
-    /// `Some(n)` = n bytes in `buf`; `None` = timeout / EOF / stdin isn't a
-    /// quieted terminal — in the can't-read cases it first sleeps out the
-    /// interval so the caller (which treats `None` as a tick) doesn't busy-loop.
-    /// Retries on `EINTR` (e.g. SIGCONT after Ctrl-Z).
-    fn poll_bytes(deadline: Instant, buf: &mut [u8]) -> Option<usize> {
+    /// `Bytes(n)` = n bytes in `buf`; `Redraw` = a resize/resume needs a
+    /// repaint; `Timeout` = deadline / EOF / stdin isn't a quieted terminal —
+    /// in the can't-read cases it first sleeps out the interval so the caller
+    /// (which treats a timeout as a tick) doesn't busy-loop. Retries on `EINTR`
+    /// (e.g. SIGCONT after Ctrl-Z).
+    fn poll_bytes(deadline: Instant, buf: &mut [u8]) -> Input {
         let sleep_out = || std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
         let Some((fd, _)) = *SAVED.lock().unwrap() else {
             sleep_out();
-            return None;
+            return Input::Timeout;
         };
         loop {
+            // Checked before every poll, so a signal that landed while we were
+            // elsewhere (mid-fetch, say) still repaints promptly.
+            if REDRAW.swap(false, AtomicOrdering::Relaxed) {
+                return Input::Redraw;
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return None;
+                return Input::Timeout;
             }
             let ms = remaining.as_millis().min(i32::MAX as u128) as i32;
             let mut pfd = libc::pollfd {
@@ -222,17 +260,17 @@ mod imp {
                         continue;
                     }
                     sleep_out();
-                    return None;
+                    return Input::Timeout;
                 }
-                Ordering::Equal => return None, // timed out
+                Ordering::Equal => return Input::Timeout, // timed out
                 Ordering::Greater => {}
             }
             let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
             if n <= 0 {
                 sleep_out(); // EOF/error on stdin
-                return None;
+                return Input::Timeout;
             }
-            return Some(n as usize);
+            return Input::Bytes(n as usize);
         }
     }
 
@@ -247,13 +285,16 @@ mod imp {
     /// Wait up to `deadline` for the next scheduled refresh, returning early on
     /// a recognized keypress: `r`/`R` refresh, Tab switch view, `?` help, `/`
     /// search, Enter open, and the movement keys (`j`/`k`/`g`/`G`, the arrows,
-    /// and Ctrl-D/Ctrl-U for half a page). Every other keystroke is discarded.
-    /// Falls back to a plain sleep when stdin isn't a quieted terminal.
+    /// and Ctrl-D/Ctrl-U for half a page). A resize or a resume from Ctrl-Z
+    /// comes back as `Redraw`. Every other keystroke is discarded. Falls back to
+    /// a plain sleep when stdin isn't a quieted terminal.
     pub fn wait(deadline: Instant) -> Wait {
         let mut buf = [0u8; 256];
         loop {
-            let Some(n) = poll_bytes(deadline, &mut buf) else {
-                return Wait::Tick;
+            let n = match poll_bytes(deadline, &mut buf) {
+                Input::Bytes(n) => n,
+                Input::Redraw => return Wait::Redraw,
+                Input::Timeout => return Wait::Tick,
             };
             let Some(action) = classify(&buf[..n]) else {
                 continue; // unrecognized keys keep us waiting
@@ -263,14 +304,15 @@ mod imp {
         }
     }
 
-    /// Read a burst of search-prompt input, or a tick if the interval elapsed.
-    /// Unlike `wait`, keystrokes are not collapsed — every typed character is
-    /// returned so live filtering keeps up with fast typing.
+    /// Read a burst of search-prompt input, a redraw, or a tick if the interval
+    /// elapsed. Unlike `wait`, keystrokes are not collapsed — every typed
+    /// character is returned so live filtering keeps up with fast typing.
     pub fn read_search(deadline: Instant) -> Vec<SearchKey> {
         let mut buf = [0u8; 256];
         match poll_bytes(deadline, &mut buf) {
-            Some(n) => parse_search(&buf[..n]),
-            None => vec![SearchKey::Tick],
+            Input::Bytes(n) => parse_search(&buf[..n]),
+            Input::Redraw => vec![SearchKey::Redraw],
+            Input::Timeout => vec![SearchKey::Tick],
         }
     }
 

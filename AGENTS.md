@@ -22,9 +22,11 @@ optional help legend last
 at the bottom. While watching, the very top shows a `my PRs / reviews` tab strip
 with the active view accented. It rings the terminal bell when one of your PRs
 merges or an open PR's status changes, and flags the changed rows (the bell and
-change markers track the Mine view only). It is a plain `std::thread::sleep`
-redraw loop — **not** a raw-mode/alt-screen TUI — so output stays pipe-friendly
-and URLs can be OSC-8 hyperlinks.
+change markers track the Mine view only). While watching it takes over the
+alternate screen and pins that bottom block to the last rows, but it is still a
+plain `std::thread::sleep` redraw loop — **not** a raw-mode TUI — and every
+escape is gated on the `styled` flag, so piped output stays plain and
+pipe-friendly and URLs can be OSC-8 hyperlinks.
 
 ## Golden rules
 
@@ -39,10 +41,12 @@ and URLs can be OSC-8 hyperlinks.
 - **Don't add a TUI framework** (ratatui, etc.): it cannot emit OSC-8 hyperlinks
   and does not degrade to plain text when piped. Both are required.
 - **Styling:** `anstyle` for SGR incl. 24-bit truecolor; OSC-8 links, the bell,
-  and the screen clear are emitted by hand. All of it is gated on a `styled`
+  and the screen control (clear, alternate screen, autowrap, cursor, the pinned
+  frame's per-line erase) are emitted by hand. All of it is gated on a `styled`
   flag, so output is plain when piped, on a non-TTY, or with `--once`, and styled
   only on an interactive TTY watch. A false `styled` flag drops the SGR colors,
-  OSC-8 hyperlinks, glyphs, and the clear, leaving plain ASCII.
+  OSC-8 hyperlinks, glyphs, the clear and the bottom-pinning, leaving plain
+  ASCII.
 - **One status palette.** Colors and glyphs live only in `status.rs` (Catppuccin
   Mocha + Nerd Font). Don't redefine them elsewhere.
 
@@ -82,7 +86,17 @@ everything else is testable modules:
   legend (`help(view, …)` — a movement-keys line then, contextual: status glyphs
   + every `STATE` value for
   Mine, review glyphs + the merged glyph for Reviews; last at the very bottom),
-  loading screen, bell, clear.
+  loading screen, bell, clear. It also owns the watch-mode screen: the
+  `ENTER_SCREEN` / `LEAVE_SCREEN` sequences (alternate screen + autowrap off +
+  cursor hidden, and their exact reverse), and `frame(body, bottom, rows,
+  caret)`, which composes one screen of exactly `rows` lines — as much of the
+  body as fits, blank padding, then the bottom block glued to the last rows.
+  When the body is taller than what's left it scrolls to keep `caret`
+  (`caret_line`, which locates the selection caret by its unique styling)
+  centered; when the bottom block alone overflows it is cut from the end, so the
+  footer survives and the help legend is what goes. Each line erases its own
+  tail and the last has no trailing newline, so painting a frame at `HOME` never
+  scrolls the screen — no clear, no flicker.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
   Each row's PR number is the OSC-8 link (no separate URL column); the queue
   columns are `# PR TITLE AUTHOR WAIT BUILD` (author truncated to
@@ -135,8 +149,13 @@ everything else is testable modules:
   cancel(-filter), and the movement keys (`j`/`k`, arrows, `g`/`G`,
   `Ctrl-D`/`Ctrl-U`); `read_search` returns raw `SearchKey`s (char/backspace/
   enter/esc) for the search prompt (no key-repeat collapse, so live filtering
-  keeps up). `height()` (`TIOCGWINSZ`) sizes the half-page jump. Restored on
-  every exit path; a no-op on non-Unix.
+  keeps up). A resize (SIGWINCH) or a resume from Ctrl-Z sets an atomic flag
+  that the poll turns into a `Wait::Redraw` / `SearchKey::Redraw`, so the pinned
+  frame — which is laid out for a specific terminal height — is repainted at the
+  new size without waiting for a key or refetching. Ctrl-Z hands the whole
+  screen back (leaves the alternate screen) and `fg` takes it again.
+  `height()` (`TIOCGWINSZ`) sizes both the half-page jump and the pinned frame.
+  Restored on every exit path; a no-op on non-Unix.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
 ## Key behaviors
@@ -190,15 +209,22 @@ everything else is testable modules:
   seeds change-detection from it
   so the first live refresh highlights what changed while prowl wasn't running,
   but stays silent (no startup bell). `--no-cache` skips both read and write.
-- **Terminal:** while watching, the cursor is hidden and stdin echo/line
-  buffering are turned off, so stray keystrokes neither garble the dashboard nor
+- **Terminal:** while watching, prowl takes the terminal over — the alternate
+  screen (so the shell's scrollback is handed back untouched on exit), autowrap
+  off (the pinned frame assumes one screen row per rendered line, so an
+  over-long line is clipped rather than wrapped), the cursor hidden, and stdin
+  echo/line buffering turned off, so stray keystrokes neither garble the
+  dashboard nor
   spill into the shell; signal keys (Ctrl-C/Ctrl-Z) still fire. `r`/`R` forces a
   refresh now; `Tab` switches view; `?` toggles the help legend
   (contextual to the active view — status glyphs + `STATE` values for Mine,
   review glyphs for Reviews — hidden by default, rendered last at the very
   bottom; `--no-help` only affects one-shot/piped output). The movement keys
   (`j`/`k`, arrows, `g`/`G`, `Ctrl-D`/`Ctrl-U`) drive the selection cursor,
-  Enter opens it, and `/` filters (Esc clears). The only persistent
+  Enter opens it, and `/` filters (Esc clears). The bottom block — search
+  prompt, error line, footer, help legend — is glued to the last rows of the
+  screen (`render::frame`), and the sections scroll under it, following the
+  selection. The only persistent
   bottom line is the footer
   (`r refresh (every 5m) - tab switch view - enter open - / search - ? help`),
   which carries
@@ -210,10 +236,12 @@ everything else is testable modules:
   `r refresh (every 5m)` once the fetch finishes. The blocking
   fetch runs on a worker thread (`std::thread::scope`) while the main thread
   keeps polling input, so navigation, `?` and `Tab` stay responsive even
-  mid-refresh. Both
-  the cursor and terminal mode are
+  mid-refresh. A resize or a resume from Ctrl-Z repaints the frame at the new
+  size on its own. The cursor, autowrap, the alternate screen and the terminal
+  mode are all
   restored on every normal or early (`?`-operator) return (Drop guards) and on
-  SIGINT (the Ctrl-C handler).
+  SIGINT/SIGTERM/SIGHUP (the `ctrlc` handler, `termination` feature), which skip
+  destructors.
 
 ## The GraphQL queries + REST (see `model.rs` / `commits.rs`)
 

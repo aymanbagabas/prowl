@@ -488,6 +488,8 @@ impl Ui {
     fn on_key(&mut self, action: term::Wait, last_good: Option<&Sections>, styled: bool) -> Act {
         match action {
             term::Wait::Tick | term::Wait::Refresh => Act::Refresh,
+            // A resize or a resume from Ctrl-Z: nothing changed but the screen.
+            term::Wait::Redraw => Act::Repaint,
             term::Wait::ToggleHelp => {
                 self.show_help = !self.show_help;
                 Act::Repaint
@@ -539,6 +541,7 @@ impl Ui {
     fn on_search_key(&mut self, key: term::SearchKey) -> Act {
         match key {
             term::SearchKey::Tick => Act::Refresh,
+            term::SearchKey::Redraw => Act::Repaint,
             term::SearchKey::Char(c) => {
                 self.search.push(c);
                 self.selected = None;
@@ -959,20 +962,33 @@ fn short_error(e: &anyhow::Error) -> String {
     }
 }
 
-/// Restores the terminal cursor when dropped (normal return or a `?` error). A
-/// matching Ctrl-C handler covers SIGINT, which skips destructors.
-struct CursorGuard;
+/// Restores the terminal when dropped (normal return or a `?` error): the
+/// cursor comes back, autowrap is re-enabled, and we leave the alternate screen
+/// — handing back the shell's scrollback exactly as we found it. A matching
+/// signal handler covers SIGINT/SIGTERM/SIGHUP, which skip destructors.
+struct ScreenGuard;
 
-impl Drop for CursorGuard {
+impl Drop for ScreenGuard {
     fn drop(&mut self) {
-        print!("{}", render::SHOW_CURSOR);
+        print!("{}", render::LEAVE_SCREEN);
         let _ = std::io::stdout().flush();
     }
 }
 
-/// Clear the screen and paint `body`, flushing stdout.
-fn repaint(body: &str) -> std::io::Result<()> {
-    print!("{}{body}", render::clear());
+/// Paint `body` with `bottom` beneath it, flushing stdout. While watching, the
+/// dashboard owns the alternate screen and knows how tall it is, so the frame is
+/// pinned: `bottom` (search prompt, error line, footer, help) sits on the last
+/// rows and the body scrolls under it, following the selection caret. Elsewhere
+/// (`--demo`, or when the height can't be read) it's a plain clear-and-print.
+fn repaint(body: &str, bottom: &str, pinned: bool) -> std::io::Result<()> {
+    match term::height().filter(|_| pinned) {
+        Some(rows) => print!(
+            "{}{}",
+            render::HOME,
+            render::frame(body, bottom, rows as usize, render::caret_line(body))
+        ),
+        None => print!("{}{body}{bottom}", render::clear()),
+    }
     std::io::stdout().flush()
 }
 
@@ -995,14 +1011,14 @@ pub fn run() -> Result<()> {
             newly_merged: std::collections::HashSet::from([119]),
         };
         let interval = timefmt::eta(cli.interval.dur);
-        let body = render_body(&sections, &cli, cli.view, &changes, interactive, None)
-            + &bottom(
-                "",
-                "",
-                &render::footer(&interval, false, interactive),
-                &help_block(&cli, cli.view, !cli.no_help, interactive),
-            );
-        repaint(&body)?;
+        let body = render_body(&sections, &cli, cli.view, &changes, interactive, None);
+        let bottom = bottom(
+            "",
+            "",
+            &render::footer(&interval, false, interactive),
+            &help_block(&cli, cli.view, !cli.no_help, interactive),
+        );
+        repaint(&body, &bottom, false)?;
         return Ok(());
     }
 
@@ -1036,23 +1052,27 @@ pub fn run() -> Result<()> {
     // Build a frame from already-fetched data (no new fetch): the active view of
     // `good` plus the current `ui` (help/status/selection) and the given footer
     // (the `refreshing` variant while a fetch is in flight, else the idle one).
-    // Used for the cached-start paint and every key repaint while idling or
-    // mid-refresh, so those stay in lockstep.
+    // Returns the body and the bottom block separately, so the paint can pin the
+    // latter to the last rows of the screen. Used for the cached-start paint and
+    // every key repaint while idling or mid-refresh, so those stay in lockstep.
     let idle_frame = |good: &Sections, ui: &Ui, footer: &str| {
         let mut buf = None;
         let shown = shown(good, ui, &mut buf);
-        render_body(
-            shown,
-            &cli,
-            ui.view,
-            &Changes::default(),
-            styled,
-            ui.selected,
-        ) + &bottom(
-            &search_line(ui, shown, styled),
-            &ui.last_status,
-            footer,
-            &help_block(&cli, ui.view, ui.show_help, styled),
+        (
+            render_body(
+                shown,
+                &cli,
+                ui.view,
+                &Changes::default(),
+                styled,
+                ui.selected,
+            ),
+            bottom(
+                &search_line(ui, shown, styled),
+                &ui.last_status,
+                footer,
+                &help_block(&cli, ui.view, ui.show_help, styled),
+            ),
         )
     };
 
@@ -1071,32 +1091,34 @@ pub fn run() -> Result<()> {
         searching: false,
     };
 
-    // In watch mode, hide the cursor and quiet stdin (no echo / no line
-    // buffering, but signal keys still work) for the whole session, restoring
-    // both on every exit path: the guards for normal/`?` returns, the Ctrl-C
-    // handler for SIGINT. Then paint instantly from the cache if we have it —
-    // otherwise a loading screen — while the first live fetch runs.
-    let (_cursor, _input) = if watch {
-        print!("{}", render::HIDE_CURSOR);
+    // In watch mode, take over the terminal for the whole session — the
+    // alternate screen, no autowrap, no cursor — and quiet stdin (no echo / no
+    // line buffering, but signal keys still work), restoring both on every exit
+    // path: the guards for normal/`?` returns, the signal handler for
+    // SIGINT/SIGTERM/SIGHUP (which skip destructors). Then paint instantly from
+    // the cache if we have it — otherwise a loading screen — while the first
+    // live fetch runs.
+    let (_screen, _input) = if watch {
+        print!("{}", render::ENTER_SCREEN);
         let input = term::quiet();
         let _ = ctrlc::set_handler(|| {
             term::restore();
-            print!("{}", render::SHOW_CURSOR);
+            print!("{}", render::LEAVE_SCREEN);
             let _ = std::io::stdout().flush();
             std::process::exit(130);
         });
         if let Some(c) = (!cli.no_cache).then(|| cache::load(&repo)).flatten() {
-            repaint(&idle_frame(&c.sections, &ui, &footer))?;
+            let (body, bot) = idle_frame(&c.sections, &ui, &footer);
+            repaint(&body, &bot, watch)?;
             prev = Some(Tracker::build(
                 c.sections.prs.as_deref(),
                 c.sections.merged.as_deref(),
             ));
             last_good = Some(c.sections);
         } else {
-            println!("{}{}", render::clear(), render::loading(styled));
-            std::io::stdout().flush()?;
+            repaint(&render::loading(styled), "", watch)?;
         }
-        (Some(CursorGuard), input)
+        (Some(ScreenGuard), input)
     } else {
         (None, None)
     };
@@ -1123,14 +1145,14 @@ pub fn run() -> Result<()> {
         if !cli.no_cache {
             cache::save(&repo, &sections);
         }
-        let frame = render_body(&sections, &cli, cli.view, &Changes::default(), styled, None)
-            + &bottom(
-                "",
-                "",
-                "",
-                &help_block(&cli, cli.view, !cli.no_help, styled),
-            );
-        print!("{frame}");
+        let body = render_body(&sections, &cli, cli.view, &Changes::default(), styled, None);
+        let bottom = bottom(
+            "",
+            "",
+            "",
+            &help_block(&cli, cli.view, !cli.no_help, styled),
+        );
+        print!("{body}{bottom}");
         std::io::stdout().flush()?;
         return Ok(());
     }
@@ -1148,7 +1170,8 @@ pub fn run() -> Result<()> {
         // captured) so `on_key` can still mutate it below.
         let paint_refreshing = |ui: &Ui| {
             if let Some(good) = &last_good {
-                let _ = repaint(&idle_frame(good, ui, &footer_refreshing));
+                let (body, bot) = idle_frame(good, ui, &footer_refreshing);
+                let _ = repaint(&body, &bot, watch);
             }
         };
         paint_refreshing(&ui);
@@ -1184,14 +1207,14 @@ pub fn run() -> Result<()> {
                 );
                 let mut buf = None;
                 let shown = shown(&sections, &ui, &mut buf);
-                let body = render_body(shown, &cli, ui.view, &changes, styled, ui.selected)
-                    + &bottom(
-                        &search_line(&ui, shown, styled),
-                        "",
-                        &footer,
-                        &help_block(&cli, ui.view, ui.show_help, styled),
-                    );
-                repaint(&body)?;
+                let body = render_body(shown, &cli, ui.view, &changes, styled, ui.selected);
+                let bot = bottom(
+                    &search_line(&ui, shown, styled),
+                    "",
+                    &footer,
+                    &help_block(&cli, ui.view, ui.show_help, styled),
+                );
+                repaint(&body, &bot, watch)?;
 
                 if armed && bell && !cli.no_bell {
                     render::ring_bell();
@@ -1205,7 +1228,7 @@ pub fn run() -> Result<()> {
             }
             Err(e) => {
                 ui.last_status = error_trailing(&short_error(&e), styled);
-                let (main, search, help) = match &last_good {
+                let (body, search, help) = match &last_good {
                     Some(good) => {
                         let mut buf = None;
                         let shown = shown(good, &ui, &mut buf);
@@ -1224,8 +1247,8 @@ pub fn run() -> Result<()> {
                     }
                     None => (String::new(), String::new(), String::new()),
                 };
-                let body = main + &bottom(&search, &ui.last_status, &footer, &help);
-                repaint(&body)?;
+                let bot = bottom(&search, &ui.last_status, &footer, &help);
+                repaint(&body, &bot, watch)?;
             }
         }
         // Wait for the interval, but let the user act now: `r` forces a refresh,
@@ -1237,7 +1260,8 @@ pub fn run() -> Result<()> {
                 Act::Refresh => break,
                 Act::Repaint => {
                     if let Some(good) = &last_good {
-                        repaint(&idle_frame(good, &ui, &footer))?;
+                        let (body, bot) = idle_frame(good, &ui, &footer);
+                        repaint(&body, &bot, watch)?;
                     }
                 }
                 Act::Idle => {}

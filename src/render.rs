@@ -487,9 +487,81 @@ pub fn clear() -> &'static str {
     "\x1b[2J\x1b[H"
 }
 
-/// Hide / show the terminal cursor.
-pub const HIDE_CURSOR: &str = "\x1b[?25l";
-pub const SHOW_CURSOR: &str = "\x1b[?25h";
+/// Home the cursor without clearing. The pinned watch frame repaints every row
+/// in place and each row erases its own tail, so clearing first would only add
+/// a flash of blank screen between frames.
+pub const HOME: &str = "\x1b[H";
+
+/// Erase from the cursor to the end of the line, so a short row can't leave the
+/// tail of a longer previous one behind.
+const ERASE_LINE: &str = "\x1b[K";
+
+/// Take the terminal over for the watch dashboard: enter the alternate screen
+/// buffer (`?1049h`), turn autowrap off (`?7l`), and hide the cursor (`?25l`).
+/// Autowrap has to go because the pinned frame assumes one screen row per
+/// rendered line — on a terminal narrower than the dashboard, an over-long line
+/// must be clipped by the terminal rather than wrapped onto a second row.
+pub const ENTER_SCREEN: &str = "\x1b[?1049h\x1b[?7l\x1b[?25l";
+
+/// Hand the terminal back, exactly reversing `ENTER_SCREEN`: show the cursor,
+/// restore autowrap, and leave the alternate screen — which puts the shell's
+/// scrollback back the way we found it.
+pub const LEAVE_SCREEN: &str = "\x1b[?25h\x1b[?7h\x1b[?1049l";
+
+/// The index of the body line carrying the navigation caret, if any — what the
+/// pinned frame scrolls to keep in view. The caret's styling is unique to it
+/// (the change marker in the same column uses another color), so looking for
+/// the rendered sequence locates the selected row wherever it was drawn,
+/// including in the shipments section, which lays out its rows by hand.
+pub fn caret_line(body: &str) -> Option<usize> {
+    let needles = [
+        render_cell(&select_marker(false), true),
+        render_cell(&select_marker(true), true),
+    ];
+    body.lines()
+        .position(|l| needles.iter().any(|n| l.contains(n.as_str())))
+}
+
+/// Compose one screen of exactly `rows` lines: as much of `body` as fits, blank
+/// padding, then `bottom` glued to the last rows. When the body is taller than
+/// the space left over it scrolls, keeping `caret` (an index into the body's
+/// lines) centered in view. Every line erases its own tail and the last one has
+/// no trailing newline, so painting this over the previous frame repaints the
+/// screen in place without ever scrolling it.
+pub fn frame(body: &str, bottom: &str, rows: usize, caret: Option<usize>) -> String {
+    let body: Vec<&str> = body.lines().collect();
+    let all_bottom: Vec<&str> = bottom.lines().collect();
+    // The bottom block wins the space it needs; if it alone overflows (a short
+    // terminal with the help legend open), it keeps its head — the search
+    // prompt, error line and footer — and the legend below them is what gets cut.
+    let bottom = &all_bottom[..all_bottom.len().min(rows)];
+    let avail = rows - bottom.len();
+
+    // Centering the caret makes the body scroll a line at a time in either
+    // direction; with no caret (or nothing to scroll) we sit at the top.
+    let off = match caret {
+        Some(c) if body.len() > avail => c
+            .saturating_sub(avail / 2)
+            .min(body.len().saturating_sub(avail)),
+        _ => 0,
+    };
+    let shown = body.len().saturating_sub(off).min(avail);
+
+    let mut out = String::new();
+    let lines = body[off..off + shown]
+        .iter()
+        .copied()
+        .chain(std::iter::repeat_n("", avail - shown))
+        .chain(bottom.iter().copied());
+    for (i, line) in lines.enumerate() {
+        if i > 0 {
+            out.push_str("\r\n");
+        }
+        out.push_str(line);
+        out.push_str(ERASE_LINE);
+    }
+    out
+}
 
 /// The dim placeholder shown during the very first fetch, before any data has
 /// been rendered.
@@ -730,5 +802,95 @@ mod tests {
         fit_titles(&mut [&mut a, &mut b], false);
         // Both title cells are padded/truncated to one shared display width.
         assert_eq!(w(&a.rows[0][1].text), w(&b.rows[0][1].text));
+    }
+
+    /// Split a painted frame back into its rows, dropping each row's
+    /// erase-to-end-of-line escape.
+    fn rows_of(screen: &str) -> Vec<&str> {
+        screen
+            .split("\r\n")
+            .map(|l| l.trim_end_matches(ERASE_LINE))
+            .collect()
+    }
+
+    #[test]
+    fn frame_pins_the_bottom_block_to_the_last_rows() {
+        let screen = frame("a\nb\n", "footer", 6, None);
+        // A short body is padded out so the footer lands on the last row.
+        assert_eq!(rows_of(&screen), ["a", "b", "", "", "", "footer"]);
+        // Exactly `rows` lines with no trailing newline, so painting the frame
+        // over the previous one can never scroll the screen.
+        assert!(!screen.ends_with('\n'));
+    }
+
+    #[test]
+    fn frame_scrolls_the_body_to_keep_the_caret_in_view() {
+        let body = (0..20)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // 6 rows, one of them the footer, leaves 5 for the body.
+        let five = |caret| frame(&body, "footer", 6, caret);
+
+        // With no selection the body starts at the top...
+        assert_eq!(rows_of(&five(None)), ["0", "1", "2", "3", "4", "footer"]);
+        // ...a caret past the fold scrolls into view, centered...
+        assert_eq!(
+            rows_of(&five(Some(10))),
+            ["8", "9", "10", "11", "12", "footer"]
+        );
+        // ...and the last row can't scroll past the end of the body.
+        assert_eq!(
+            rows_of(&five(Some(19))),
+            ["15", "16", "17", "18", "19", "footer"]
+        );
+    }
+
+    #[test]
+    fn frame_keeps_the_footer_when_the_bottom_block_overflows() {
+        // Too short for both: the body goes, and the bottom block is cut from
+        // the end so its first lines — up to and including the footer — stay.
+        assert_eq!(
+            rows_of(&frame("a\nb\n", "footer\nh1\nh2", 2, None)),
+            ["footer", "h1"]
+        );
+    }
+
+    #[test]
+    fn frame_always_fills_exactly_the_screen() {
+        // Degenerate shapes must not panic, must paint exactly `rows` lines,
+        // must not end with a newline (which would scroll the screen), and must
+        // never drop the head of the bottom block (where the footer lives).
+        let bodies = ["", "\n", "a", "a\n", "a\nb\nc\nd\ne\nf\ng\nh\n", "x\n\n\n"];
+        let bottoms = ["", "f", "s\nf", "f\nh1\nh2\nh3\nh4"];
+        for body in bodies {
+            for bottom in bottoms {
+                for rows in 0..12usize {
+                    for caret in [None, Some(0), Some(1), Some(5), Some(100)] {
+                        let screen = frame(body, bottom, rows, caret);
+                        if rows == 0 {
+                            assert!(screen.is_empty());
+                            continue;
+                        }
+                        assert_eq!(rows_of(&screen).len(), rows, "{body:?}/{bottom:?}/{rows}");
+                        assert!(!screen.ends_with('\n'));
+                        if let Some(footer) = bottom.lines().next() {
+                            assert!(screen.contains(footer), "{body:?}/{bottom:?}/{rows}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn caret_line_finds_the_selected_row() {
+        let caret = render_cell(&select_marker(false), true);
+        // The change marker shares the column but not the styling, so it can't
+        // be mistaken for the caret.
+        let changed = render_cell(&change_marker(true, false), true);
+        let body = format!("head\n{changed} changed\n{caret} selected\ntail");
+        assert_eq!(caret_line(&body), Some(2));
+        assert_eq!(caret_line("nothing selected"), None);
     }
 }
