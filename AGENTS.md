@@ -279,10 +279,6 @@ cargo test                                   # offline, fixture-based
 bin-plus-test-lib — so `clippy -D warnings` still runs pedantic and new pedantic
 findings fail CI.
 
-The hidden `--demo` flag (synthetic data for screenshots) is behind the
-off-by-default `demo` cargo feature, so release builds don't ship it. Build or
-run it with `cargo run --features demo -- --demo`.
-
 CI (`.github/workflows/build.yml`) runs fmt/clippy/build/test (the `build` job)
 and `cargo audit` for dependency advisories (the `audit` job) on push and PRs.
 

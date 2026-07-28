@@ -149,243 +149,6 @@ fn fetch(
     })
 }
 
-/// Synthetic dashboard data for `--demo` (screenshots): no auth, repo, or
-/// network. Times are relative to now so the ages look fresh. Temporary.
-#[cfg(feature = "demo")]
-fn demo_sections() -> Sections {
-    use chrono::{SecondsFormat, Utc};
-    let ago = |secs: i64| {
-        (Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339_opts(SecondsFormat::Secs, true)
-    };
-    let pr = |number, is_draft, title: &str, status, merge_state: &str, fail, secs| prs::PrRow {
-        number,
-        is_draft,
-        title: title.to_string(),
-        status,
-        merge_state: Some(merge_state.to_string()),
-        queue: None,
-        fail,
-        url: format!("https://github.com/caarlos0/prowl/pull/{number}"),
-        updated_at: Some(ago(secs)),
-    };
-    use status::Status::*;
-    let prs = vec![
-        pr(
-            128,
-            false,
-            "feat(render): truecolor status palette",
-            Some(Pass),
-            "CLEAN",
-            0,
-            300,
-        ),
-        pr(
-            127,
-            false,
-            "fix(term): restore cursor on SIGTSTP",
-            Some(Fail),
-            "BLOCKED",
-            2,
-            1080,
-        ),
-        pr(
-            125,
-            false,
-            "perf(cache): paint from disk on startup",
-            Some(Pending),
-            "UNSTABLE",
-            0,
-            2400,
-        ),
-        pr(
-            124,
-            true,
-            "wip: nix flake + home-manager module",
-            None,
-            "DRAFT",
-            0,
-            7200,
-        ),
-        pr(
-            120,
-            false,
-            "chore(deps): bump ureq to 3.x",
-            Some(Conflicts),
-            "DIRTY",
-            0,
-            10800,
-        ),
-    ];
-
-    let qrow =
-        |position, number, author: &str, title: &str, mine, wait_secs, build_secs: Option<i64>| {
-            queue::QueueRow {
-                position,
-                number,
-                author: author.to_string(),
-                title: title.to_string(),
-                url: format!("https://github.com/caarlos0/prowl/pull/{number}"),
-                mine,
-                enqueued_at: Some(ago(wait_secs)),
-                build_started_at: build_secs.map(|s| ago(s)),
-            }
-        };
-    let queue = vec![
-        qrow(
-            1,
-            118,
-            "caarlos0",
-            "feat(queue): inline merge-queue position",
-            true,
-            720,
-            Some(480),
-        ),
-        qrow(
-            2,
-            131,
-            "dependabot[bot]",
-            "build(deps): bump anstyle to 1.1",
-            false,
-            480,
-            Some(180),
-        ),
-        qrow(
-            3,
-            117,
-            "octocat",
-            "docs: clarify the --only flag",
-            false,
-            300,
-            None,
-        ),
-    ];
-
-    let base = "https://github.com/caarlos0/prowl";
-    let rel = |tag: &str| {
-        Some(commits::ReleaseRef {
-            tag: tag.to_string(),
-            url: format!("{base}/releases/tag/{tag}"),
-        })
-    };
-    let mrow = |number, title: &str, secs, release| merged::MergedRow {
-        number,
-        title: title.to_string(),
-        url: format!("{base}/pull/{number}"),
-        release,
-        merged_at: Some(ago(secs)),
-    };
-    // Recent merges aren't shipped yet (None); older ones map to a release.
-    let merged = vec![
-        mrow(119, "feat(status): ignore phantom check suites", 720, None),
-        mrow(116, "fix(github): exact-match the remote host", 7200, None),
-        mrow(
-            112,
-            "ci: build a snapshot on pull requests",
-            86_400,
-            rel("v0.4.0"),
-        ),
-        mrow(
-            108,
-            "feat(render): OSC-8 hyperlinks for URLs",
-            259_200,
-            rel("v0.3.0"),
-        ),
-    ];
-
-    let bucket = |mine, capped, url: String| commits::Bucket {
-        count: commits::Count { mine, capped },
-        url,
-    };
-    let release = |tag: &str, mine, capped, secs| commits::Release {
-        tag: tag.to_string(),
-        bucket: bucket(mine, capped, format!("{base}/releases/tag/{tag}")),
-        published_at: Some(ago(secs)),
-    };
-    let commits = commits::CommitStats {
-        available: true,
-        upcoming: Some(bucket(7, false, format!("{base}/compare/v0.4.0...main"))),
-        releases: vec![
-            release("v0.4.0", 12, false, 432_000),
-            release("v0.3.0", 9, false, 1_728_000),
-            release("v0.2.0", 31, true, 3_456_000),
-            release("v0.1.0", 18, false, 6_048_000),
-        ],
-    };
-
-    // Reviews-view demo data (shown with `--demo --view reviews`).
-    use status::ReviewState;
-    let rrow = |number, author: &str, title: &str, state, secs| reviews::ReviewRow {
-        number,
-        is_draft: false,
-        title: title.to_string(),
-        author: author.to_string(),
-        url: format!("{base}/pull/{number}"),
-        state,
-        updated_at: Some(ago(secs)),
-    };
-    let reviews = vec![
-        rrow(
-            142,
-            "octocat",
-            "feat(api): paginate the search endpoint",
-            ReviewState::Awaiting,
-            420,
-        ),
-        rrow(
-            139,
-            "hubot",
-            "fix(auth): refresh tokens before expiry",
-            ReviewState::ReReview,
-            1500,
-        ),
-        rrow(
-            133,
-            "dependabot[bot]",
-            "build(deps): bump rustls to 0.24",
-            ReviewState::Updated,
-            5400,
-        ),
-        rrow(
-            130,
-            "octocat",
-            "docs: expand the troubleshooting guide",
-            ReviewState::Reviewed,
-            9000,
-        ),
-    ];
-    let mrow_rev = |number, author: &str, title: &str, secs| reviews::ReviewedMergedRow {
-        number,
-        title: title.to_string(),
-        author: author.to_string(),
-        url: format!("{base}/pull/{number}"),
-        merged_at: Some(ago(secs)),
-    };
-    let reviewed_merged = vec![
-        mrow_rev(
-            126,
-            "hubot",
-            "refactor(store): drop the legacy cache path",
-            64_800,
-        ),
-        mrow_rev(
-            122,
-            "octocat",
-            "test(queue): cover the empty queue",
-            172_800,
-        ),
-    ];
-
-    Sections {
-        merged: Some(merged),
-        queue: Some(queue),
-        queue_next_eta: Some(11 * 60),
-        prs: Some(prs),
-        commits: Some(commits),
-        reviews: Some(reviews),
-        reviewed_merged: Some(reviewed_merged),
-    }
-}
-
 /// Render one PR section: a counted header, then either its table or, when
 /// empty, a dim placeholder. `table` is `None` exactly when the section is
 /// empty (empties are filtered out before alignment).
@@ -975,13 +738,14 @@ impl Drop for ScreenGuard {
     }
 }
 
-/// Paint `body` with `bottom` beneath it, flushing stdout. While watching, the
-/// dashboard owns the alternate screen and knows how tall it is, so the frame is
-/// pinned: `bottom` (search prompt, error line, footer, help) sits on the last
-/// rows and the body scrolls under it, following the selection caret. Elsewhere
-/// (`--demo`, or when the height can't be read) it's a plain clear-and-print.
-fn repaint(body: &str, bottom: &str, pinned: bool) -> std::io::Result<()> {
-    match term::height().filter(|_| pinned) {
+/// Paint `body` with `bottom` beneath it, flushing stdout. Only ever called
+/// while watching, where the dashboard owns the alternate screen and knows how
+/// tall it is, so the frame is pinned: `bottom` (search prompt, error line,
+/// footer, help) sits on the last rows and the body scrolls under it, following
+/// the selection caret. If the height can't be read after all, it degrades to a
+/// plain clear-and-print.
+fn repaint(body: &str, bottom: &str) -> std::io::Result<()> {
+    match term::height() {
         Some(rows) => print!(
             "{}{}",
             render::HOME,
@@ -1000,27 +764,6 @@ pub fn run() -> Result<()> {
     // but rendering is plain under `--once` (single-shot/scriptable output).
     let interactive = std::io::stdout().is_terminal();
     let styled = interactive && !cli.once;
-
-    // `--demo`: render synthetic data once and exit (no auth/repo/network), so
-    // the dashboard can be screenshotted. Styled on a TTY, plain when piped.
-    #[cfg(feature = "demo")]
-    if cli.demo {
-        let sections = demo_sections();
-        let changes = Changes {
-            status_changed: std::collections::HashSet::from([127]),
-            newly_merged: std::collections::HashSet::from([119]),
-        };
-        let interval = timefmt::eta(cli.interval.dur);
-        let body = render_body(&sections, &cli, cli.view, &changes, interactive, None);
-        let bottom = bottom(
-            "",
-            "",
-            &render::footer(&interval, false, interactive),
-            &help_block(&cli, cli.view, !cli.no_help, interactive),
-        );
-        repaint(&body, &bottom, false)?;
-        return Ok(());
-    }
 
     // Authenticate first (this may run the interactive device flow and print
     // prompts, so it must happen before we hide the cursor / clear the screen).
@@ -1109,14 +852,14 @@ pub fn run() -> Result<()> {
         });
         if let Some(c) = (!cli.no_cache).then(|| cache::load(&repo)).flatten() {
             let (body, bot) = idle_frame(&c.sections, &ui, &footer);
-            repaint(&body, &bot, watch)?;
+            repaint(&body, &bot)?;
             prev = Some(Tracker::build(
                 c.sections.prs.as_deref(),
                 c.sections.merged.as_deref(),
             ));
             last_good = Some(c.sections);
         } else {
-            repaint(&render::loading(styled), "", watch)?;
+            repaint(&render::loading(styled), "")?;
         }
         (Some(ScreenGuard), input)
     } else {
@@ -1171,7 +914,7 @@ pub fn run() -> Result<()> {
         let paint_refreshing = |ui: &Ui| {
             if let Some(good) = &last_good {
                 let (body, bot) = idle_frame(good, ui, &footer_refreshing);
-                let _ = repaint(&body, &bot, watch);
+                let _ = repaint(&body, &bot);
             }
         };
         paint_refreshing(&ui);
@@ -1214,7 +957,7 @@ pub fn run() -> Result<()> {
                     &footer,
                     &help_block(&cli, ui.view, ui.show_help, styled),
                 );
-                repaint(&body, &bot, watch)?;
+                repaint(&body, &bot)?;
 
                 if armed && bell && !cli.no_bell {
                     render::ring_bell();
@@ -1248,7 +991,7 @@ pub fn run() -> Result<()> {
                     None => (String::new(), String::new(), String::new()),
                 };
                 let bot = bottom(&search, &ui.last_status, &footer, &help);
-                repaint(&body, &bot, watch)?;
+                repaint(&body, &bot)?;
             }
         }
         // Wait for the interval, but let the user act now: `r` forces a refresh,
@@ -1261,7 +1004,7 @@ pub fn run() -> Result<()> {
                 Act::Repaint => {
                     if let Some(good) = &last_good {
                         let (body, bot) = idle_frame(good, &ui, &footer);
-                        repaint(&body, &bot, watch)?;
+                        repaint(&body, &bot)?;
                     }
                 }
                 Act::Idle => {}
