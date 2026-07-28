@@ -13,9 +13,9 @@
 use crate::cli::View;
 use crate::status;
 use uncurses::ansi::truncate::truncate as truncate_tail;
-use uncurses::buffer::TextBuffer;
+use uncurses::buffer::{Bounded, Surface, SurfaceMut, TextBuffer, View as BufView};
 use uncurses::color::{Color, Profile};
-use uncurses::layout::Position;
+use uncurses::layout::{Position, Rect};
 use uncurses::style::Style;
 use uncurses::text::{Encode, TextSurface};
 
@@ -389,6 +389,44 @@ pub fn paint_search_prompt(
     (y + 1, caret)
 }
 
+/// Compose one screen of exactly `rows` rows: as much of `body` as fits at the
+/// top, then `bottom` glued to the last rows. When the body is taller than the
+/// space left over it scrolls, keeping `caret` (a row index into `body`) centered
+/// in view. `screen` is assumed already cleared, so the gap between the two is
+/// blank padding. Returns the row the bottom block starts on, which callers need
+/// to translate positions inside it (the search caret) into screen coordinates.
+pub fn compose<T: SurfaceMut + Bounded + ?Sized>(
+    screen: &mut T,
+    body: &mut TextBuffer,
+    body_h: u16,
+    bottom: &mut TextBuffer,
+    bottom_h: u16,
+    rows: u16,
+    caret: Option<u16>,
+) -> u16 {
+    // The bottom block wins the space it needs; if it alone overflows (a short
+    // terminal with the help legend open) it keeps its head — the search prompt,
+    // error line and footer — and the legend below them is what gets cut.
+    let shown_bottom = bottom_h.min(rows);
+    let avail = rows - shown_bottom;
+
+    // Centering the caret scrolls the body a row at a time in either direction;
+    // with no caret (or nothing to scroll) we sit at the top.
+    let off = match caret {
+        Some(c) if body_h > avail => c.saturating_sub(avail / 2).min(body_h - avail),
+        _ => 0,
+    };
+    if avail > 0 {
+        // A `View` clips without translating, so drawing it maps its top-left —
+        // the first visible body row — onto the top of the screen.
+        let w = body.width();
+        BufView::new(body, Rect::new(0, off, w, avail)).draw(screen, Position::new(0, 0));
+    }
+    let top = rows - shown_bottom;
+    bottom.draw(screen, Position::new(0, top));
+    top
+}
+
 /// Paint one indented `glyph  meaning` legend row at `y`: the glyph in `gstyle`,
 /// two blank columns, then the meaning in `dim`.
 fn legend_row(
@@ -493,6 +531,87 @@ mod tests {
         let mut out = Vec::new();
         canvas.encode_with(&mut out, profile).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    /// Paint one text row per line of `lines` into a buffer of that height.
+    fn buf(lines: &[&str]) -> (TextBuffer, u16) {
+        let mut b = TextBuffer::new(8, lines.len().max(1) as u16);
+        for (y, l) in lines.iter().enumerate() {
+            b.set_str((0, y as u16), l, None);
+        }
+        (b, lines.len() as u16)
+    }
+
+    /// Compose onto a `rows`-tall screen and read the result back as trimmed rows.
+    fn screen_rows(body: &[&str], bottom: &[&str], rows: u16, caret: Option<u16>) -> Vec<String> {
+        let (mut b, bh) = buf(body);
+        let (mut bot, both) = buf(bottom);
+        let mut screen = TextBuffer::new(8, rows);
+        compose(&mut screen, &mut b, bh, &mut bot, both, rows, caret);
+        let mut out: Vec<String> = screen
+            .display_with(Profile::Disabled)
+            .to_string()
+            .lines()
+            .map(|l| l.trim_end().to_string())
+            .collect();
+        // The display drops trailing all-blank rows; the buffer still has them.
+        out.resize(rows as usize, String::new());
+        out
+    }
+
+    #[test]
+    fn compose_pins_the_bottom_block_to_the_last_rows() {
+        // A short body is padded out so the footer lands on the last row.
+        assert_eq!(
+            screen_rows(&["a", "b"], &["footer"], 6, None),
+            ["a", "b", "", "", "", "footer"]
+        );
+    }
+
+    #[test]
+    fn compose_scrolls_the_body_to_keep_the_caret_in_view() {
+        let body: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        let body: Vec<&str> = body.iter().map(String::as_str).collect();
+        // 6 rows, one of them the footer, leaves 5 for the body.
+        let five = |caret| screen_rows(&body, &["footer"], 6, caret);
+
+        // With no selection the body starts at the top...
+        assert_eq!(five(None), ["0", "1", "2", "3", "4", "footer"]);
+        // ...a caret past the fold scrolls into view, centered...
+        assert_eq!(five(Some(10)), ["8", "9", "10", "11", "12", "footer"]);
+        // ...and the last row can't scroll past the end of the body.
+        assert_eq!(five(Some(19)), ["15", "16", "17", "18", "19", "footer"]);
+    }
+
+    #[test]
+    fn compose_keeps_the_footer_when_the_bottom_block_overflows() {
+        // Too short for both: the body goes, and the bottom block is cut from
+        // the end so its first lines — up to and including the footer — stay.
+        assert_eq!(
+            screen_rows(&["a", "b"], &["footer", "h1", "h2"], 2, None),
+            ["footer", "h1"]
+        );
+    }
+
+    #[test]
+    fn compose_never_panics_and_always_keeps_the_footer() {
+        // Degenerate shapes must not panic and must never drop the head of the
+        // bottom block, where the footer lives.
+        let bodies: [&[&str]; 4] = [&[], &["a"], &["a", "b", "c", "d", "e", "f"], &["x", "", ""]];
+        let bottoms: [&[&str]; 3] = [&[], &["f"], &["f", "h1", "h2", "h3"]];
+        for body in bodies {
+            for bottom in bottoms {
+                for rows in 1..12u16 {
+                    for caret in [None, Some(0), Some(1), Some(5), Some(100)] {
+                        let out = screen_rows(body, bottom, rows, caret);
+                        assert_eq!(out.len(), rows as usize, "{body:?}/{bottom:?}/{rows}");
+                        if let Some(footer) = bottom.first() {
+                            assert!(out.contains(&(*footer).to_string()));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

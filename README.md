@@ -57,10 +57,12 @@ prowl --once              # render once and exit
 
 While watching, press `r` to refresh now, `Tab` to switch between your PRs and
 your reviews, `?` to toggle the help legend, and `q` (or `Ctrl-C`) to quit;
-`Ctrl-Z` suspends it back to your shell. A footer at the bottom (`r refresh
-(every 5m) - tab switch view - enter open - / search - ? help`) shows the keys
-and the refresh interval. While a refresh is in flight the hint reads
-`r refreshing` and `r` presses are ignored until it finishes.
+`Ctrl-Z` suspends it back to your shell. The dashboard takes over the alternate
+screen, so quitting hands your shell back exactly as you left it. A footer glued
+to the bottom of the screen (`r refresh (every 5m) - tab switch view - enter open
+- / search - ? help`) shows the keys and the refresh interval. While a refresh is
+in flight the hint reads `r refreshing` and `r` presses are ignored until it
+finishes. The sections scroll under the footer, following your selection.
 The legend is contextual to the active view: status glyphs and `STATE` values
 for your PRs, review glyphs for your reviews.
 

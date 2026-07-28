@@ -26,11 +26,11 @@ interactive watch runs on the
 [**uncurses**](https://github.com/aymanbagabas/uncurses) toolkit with an event
 loop: it shows an *inline* `Loading...` frame, then enters the **alternate
 screen** [`Screen`] once the first fetch lands (or immediately when there's a
-cache to paint). Interactive `--once` uses an *inline* `Screen` instead: a
-`Loading...` frame while the fetch runs (abortable with `q`), then the dashboard
-is left in the terminal. Piped/non-TTY/`--demo` output is plain text printed
-straight to stdout, so the dashboard stays pipe-friendly and URLs can be OSC-8
-hyperlinks.
+cache to paint), where that bottom block is **pinned** to the last rows and the
+sections scroll under it. Interactive `--once` uses an *inline* `Screen` instead:
+a `Loading...` frame while the fetch runs (abortable with `q`), then the dashboard
+is left in the terminal. Piped/non-TTY output is plain text printed straight to
+stdout, so the dashboard stays pipe-friendly and URLs can be OSC-8 hyperlinks.
 
 ## Golden rules
 
@@ -100,6 +100,15 @@ watch event loop); everything else is testable modules:
   (`paint_help(view, …)` — a movement-keys line then, contextual: status glyphs +
   every `STATE` value for Mine, review glyphs + the merged glyph for Reviews)
   live here too, plus `render_table` (paint one table to a string, for tests).
+  It also owns the watch frame's geometry: `compose(screen, body, bottom, rows,
+  caret)` fills exactly `rows` rows — as much of the body as fits at the top,
+  blank padding, then the bottom block glued to the last rows — and returns the
+  row that block starts on. When the body is taller than the space left over it
+  scrolls, keeping `caret` (the row a view reported painting its selection caret
+  on) centered; when the bottom block alone overflows it keeps its head, so the
+  footer survives and the help legend is what gets cut. The body is drawn through
+  a `uncurses::buffer::View`, which clips without translating, so blitting it maps
+  the first visible body row onto the top of the screen.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
   Each row's PR number is the OSC-8 link (no separate URL column); the queue
   columns are `# PR TITLE AUTHOR WAIT BUILD` (author truncated to
@@ -150,9 +159,9 @@ watch event loop); everything else is testable modules:
 
 `run()` first creates a `uncurses::terminal::Terminal::stdio()`; interactivity is
 its `is_terminal().1` (output a TTY?). When the output is **not** a TTY (piped,
-redirected) and for `--demo`, `render_once` paints the dashboard onto an offscreen
-`TextBuffer` sized to its content (a generous `height_bound`, then cropped to the
-painted height), and `encode_with`s it to the terminal's output (`Terminal::output`)
+redirected), `render_once` paints the dashboard onto an offscreen `TextBuffer`
+sized to its content (a generous `height_bound` + `bottom_bound`, then cropped to
+the painted height), and `encode_with`s it to the terminal's output (`Terminal::output`)
 using the **detected** color `Profile` (`Profile::detect_from`), so it's colored on
 a TTY and plain when piped. Interactive `--once` instead runs `run_once_interactive`:
 an *inline* `Screen` (raw mode, hidden cursor) shows a `Loading...` frame while the
@@ -160,8 +169,10 @@ fetch runs on a background thread, so keystrokes don't echo and `q`/`Esc`/`Ctrl-
 aborts mid-fetch; on success the dashboard replaces the frame and is left inline
 (`Screen::finish` doesn't wipe an inline surface). Otherwise the same `Terminal` is
 moved into `App::start` → `Screen::new(terminal)`. The watch redraw and the inline
-one-shot frame share `render_dashboard`, which sizes the surface to the content,
-paints, crops to the painted height, and renders.
+one-shot frame share `render_dashboard`, which has two layouts: **pinned** (the
+watch, in the alternate screen) fills the terminal, scrolls the body under a
+bottom block glued to the last rows, and **unpinned** (the inline one-shot) sizes
+the surface to the content and crops to the painted height.
 
 The interactive watch is `lib.rs::App`, following the uncurses example **`App`
 pattern**: the struct owns the `uncurses::Screen` plus all dashboard state, and
@@ -178,8 +189,9 @@ output before the dashboard takes over the screen. `stop` consumes the app and c
 raw mode). Because the caller always runs `stop`, the terminal is restored on
 every path — a clean quit, a `?`-operator error, or a failed first paint (`start`
 calls `stop` itself before bailing). Each frame is painted by `redraw` →
-`render_dashboard`, which **resizes the surface to the exact content height**
-(even in the alternate screen) before `render`. The loop uses `poll_event` with
+`render_dashboard`, which pins the frame once `in_alt` is set: `autoresize` fits
+the managed area to the whole terminal, `paint_body` and `paint_bottom` each paint
+into their own `TextBuffer`, and `render::compose` places them. The loop uses `poll_event` with
 the interval as the timeout. Keys are classified into an `Action` (or, while the
 search prompt is open, a `SearchAction`) with `Key::matches`, which is
 **case-sensitive** — bindings must list both cases (`["r", "R"]`). `r`/`R`
@@ -258,7 +270,10 @@ suspends/resumes, `Resize` repaints. All watch UI state lives in one `Ui` struct
   one-shot/piped output). The movement keys (`j`/`k`, arrows, `g`/`G`,
   `Ctrl-D`/`Ctrl-U`) drive the selection cursor, Enter opens it, and `/` filters.
   `q`/`Q`/`Ctrl-C` quit (as does `Esc` with no filter applied) and `Ctrl-Z`
-  suspends/resumes. The only persistent bottom line is the footer
+  suspends/resumes. The bottom block — search prompt, error line, footer, help
+  legend — is **pinned** to the last rows of the screen (`render::compose`), and
+  the sections scroll under it, following the selection. The only persistent
+  bottom line is the footer
   (`r refresh (every 5m) - tab switch view - enter open - / search - ? help`),
   which carries the refresh interval; a failed refresh adds a dim `error: …` line
   above it. While a fetch is in flight the footer reads `r refreshing` with the
@@ -311,10 +326,6 @@ cargo test                                   # offline, fixture-based
 `#![allow(...)]`s (each justified) for the lints that are noise for a small
 bin-plus-test-lib — so `clippy -D warnings` still runs pedantic and new pedantic
 findings fail CI.
-
-The hidden `--demo` flag (synthetic data for screenshots) is behind the
-off-by-default `demo` cargo feature, so release builds don't ship it. Build or
-run it with `cargo run --features demo -- --demo`.
 
 CI (`.github/workflows/build.yml`) runs fmt/clippy/build/test (the `build` job)
 and `cargo audit` for dependency advisories (the `audit` job) on push and PRs.

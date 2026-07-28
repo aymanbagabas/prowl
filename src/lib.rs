@@ -169,243 +169,6 @@ fn fetch(
     })
 }
 
-/// Synthetic dashboard data for `--demo` (screenshots): no auth, repo, or
-/// network. Times are relative to now so the ages look fresh. Temporary.
-#[cfg(feature = "demo")]
-fn demo_sections() -> Sections {
-    use chrono::{SecondsFormat, Utc};
-    let ago = |secs: i64| {
-        (Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339_opts(SecondsFormat::Secs, true)
-    };
-    let pr = |number, is_draft, title: &str, status, merge_state: &str, fail, secs| prs::PrRow {
-        number,
-        is_draft,
-        title: title.to_string(),
-        status,
-        merge_state: Some(merge_state.to_string()),
-        queue: None,
-        fail,
-        url: format!("https://github.com/caarlos0/prowl/pull/{number}"),
-        updated_at: Some(ago(secs)),
-    };
-    use status::Status::*;
-    let prs = vec![
-        pr(
-            128,
-            false,
-            "feat(render): truecolor status palette",
-            Some(Pass),
-            "CLEAN",
-            0,
-            300,
-        ),
-        pr(
-            127,
-            false,
-            "fix(term): restore cursor on SIGTSTP",
-            Some(Fail),
-            "BLOCKED",
-            2,
-            1080,
-        ),
-        pr(
-            125,
-            false,
-            "perf(cache): paint from disk on startup",
-            Some(Pending),
-            "UNSTABLE",
-            0,
-            2400,
-        ),
-        pr(
-            124,
-            true,
-            "wip: nix flake + home-manager module",
-            None,
-            "DRAFT",
-            0,
-            7200,
-        ),
-        pr(
-            120,
-            false,
-            "chore(deps): bump ureq to 3.x",
-            Some(Conflicts),
-            "DIRTY",
-            0,
-            10800,
-        ),
-    ];
-
-    let qrow =
-        |position, number, author: &str, title: &str, mine, wait_secs, build_secs: Option<i64>| {
-            queue::QueueRow {
-                position,
-                number,
-                author: author.to_string(),
-                title: title.to_string(),
-                url: format!("https://github.com/caarlos0/prowl/pull/{number}"),
-                mine,
-                enqueued_at: Some(ago(wait_secs)),
-                build_started_at: build_secs.map(|s| ago(s)),
-            }
-        };
-    let queue = vec![
-        qrow(
-            1,
-            118,
-            "caarlos0",
-            "feat(queue): inline merge-queue position",
-            true,
-            720,
-            Some(480),
-        ),
-        qrow(
-            2,
-            131,
-            "dependabot[bot]",
-            "build(deps): bump anstyle to 1.1",
-            false,
-            480,
-            Some(180),
-        ),
-        qrow(
-            3,
-            117,
-            "octocat",
-            "docs: clarify the --only flag",
-            false,
-            300,
-            None,
-        ),
-    ];
-
-    let base = "https://github.com/caarlos0/prowl";
-    let rel = |tag: &str| {
-        Some(commits::ReleaseRef {
-            tag: tag.to_string(),
-            url: format!("{base}/releases/tag/{tag}"),
-        })
-    };
-    let mrow = |number, title: &str, secs, release| merged::MergedRow {
-        number,
-        title: title.to_string(),
-        url: format!("{base}/pull/{number}"),
-        release,
-        merged_at: Some(ago(secs)),
-    };
-    // Recent merges aren't shipped yet (None); older ones map to a release.
-    let merged = vec![
-        mrow(119, "feat(status): ignore phantom check suites", 720, None),
-        mrow(116, "fix(github): exact-match the remote host", 7200, None),
-        mrow(
-            112,
-            "ci: build a snapshot on pull requests",
-            86_400,
-            rel("v0.4.0"),
-        ),
-        mrow(
-            108,
-            "feat(render): OSC-8 hyperlinks for URLs",
-            259_200,
-            rel("v0.3.0"),
-        ),
-    ];
-
-    let bucket = |mine, capped, url: String| commits::Bucket {
-        count: commits::Count { mine, capped },
-        url,
-    };
-    let release = |tag: &str, mine, capped, secs| commits::Release {
-        tag: tag.to_string(),
-        bucket: bucket(mine, capped, format!("{base}/releases/tag/{tag}")),
-        published_at: Some(ago(secs)),
-    };
-    let commits = commits::CommitStats {
-        available: true,
-        upcoming: Some(bucket(7, false, format!("{base}/compare/v0.4.0...main"))),
-        releases: vec![
-            release("v0.4.0", 12, false, 432_000),
-            release("v0.3.0", 9, false, 1_728_000),
-            release("v0.2.0", 31, true, 3_456_000),
-            release("v0.1.0", 18, false, 6_048_000),
-        ],
-    };
-
-    // Reviews-view demo data (shown with `--demo --view reviews`).
-    use status::ReviewState;
-    let rrow = |number, author: &str, title: &str, state, secs| reviews::ReviewRow {
-        number,
-        is_draft: false,
-        title: title.to_string(),
-        author: author.to_string(),
-        url: format!("{base}/pull/{number}"),
-        state,
-        updated_at: Some(ago(secs)),
-    };
-    let reviews = vec![
-        rrow(
-            142,
-            "octocat",
-            "feat(api): paginate the search endpoint",
-            ReviewState::Awaiting,
-            420,
-        ),
-        rrow(
-            139,
-            "hubot",
-            "fix(auth): refresh tokens before expiry",
-            ReviewState::ReReview,
-            1500,
-        ),
-        rrow(
-            133,
-            "dependabot[bot]",
-            "build(deps): bump rustls to 0.24",
-            ReviewState::Updated,
-            5400,
-        ),
-        rrow(
-            130,
-            "octocat",
-            "docs: expand the troubleshooting guide",
-            ReviewState::Reviewed,
-            9000,
-        ),
-    ];
-    let mrow_rev = |number, author: &str, title: &str, secs| reviews::ReviewedMergedRow {
-        number,
-        title: title.to_string(),
-        author: author.to_string(),
-        url: format!("{base}/pull/{number}"),
-        merged_at: Some(ago(secs)),
-    };
-    let reviewed_merged = vec![
-        mrow_rev(
-            126,
-            "hubot",
-            "refactor(store): drop the legacy cache path",
-            64_800,
-        ),
-        mrow_rev(
-            122,
-            "octocat",
-            "test(queue): cover the empty queue",
-            172_800,
-        ),
-    ];
-
-    Sections {
-        merged: Some(merged),
-        queue: Some(queue),
-        queue_next_eta: Some(11 * 60),
-        prs: Some(prs),
-        commits: Some(commits),
-        reviews: Some(reviews),
-        reviewed_merged: Some(reviewed_merged),
-    }
-}
-
 /// Paint one PR section onto `s` at row `top`: a counted header (with an optional
 /// dim note), then either its table or, when empty, a dim placeholder, then a
 /// trailing blank row. Returns the next free row.
@@ -431,18 +194,28 @@ fn paint_section(
 }
 
 /// Overwrite the leading marker cell of `table`'s `local`-th row with the
-/// navigation caret (a no-op when there's no such table or row).
-fn place_caret(table: Option<&mut render::Table>, local: usize, ascii: bool) {
+/// navigation caret, returning whether there was such a row to mark.
+fn place_caret(table: Option<&mut render::Table>, local: usize, ascii: bool) -> bool {
     if let Some(row) = table.and_then(|t| t.rows.get_mut(local))
         && let Some(first) = row.first_mut()
     {
         *first = render::select_marker(ascii);
+        return true;
     }
+    false
+}
+
+/// The screen row of a table's `local`-th data row, in a section painted from
+/// row `top`: the section header, then the table's own header row, then the data.
+/// Lets a view report where it drew the caret so the frame can scroll to it.
+fn caret_row(top: u16, local: usize) -> u16 {
+    top + 2 + local as u16
 }
 
 /// The Mine view: My open PRs, Merge Queue, My merged PRs, then My Shipments.
 /// Each section always shows its header (with a count); an empty section follows
-/// it with a dim placeholder. Returns the next free row.
+/// it with a dim placeholder. Returns the next free row and the row the selection
+/// caret landed on, if any.
 fn paint_mine(
     s: &mut impl TextSurface,
     sections: &Sections,
@@ -450,7 +223,7 @@ fn paint_mine(
     selected: Option<usize>,
     ascii: bool,
     top: u16,
-) -> u16 {
+) -> (u16, Option<u16>) {
     let mut prs_table = sections
         .prs
         .as_ref()
@@ -472,16 +245,21 @@ fn paint_mine(
     // the offset past the earlier sections; any remainder indexes the shipments'
     // navigable rows (handled by `paint_commits`).
     let mut ship_sel = None;
+    // Which section's table got the caret, and at which of its rows — the row it
+    // ends up on isn't known until that section is painted.
+    let (mut prs_sel, mut queue_sel, mut merged_sel) = (None, None, None);
     if let Some(sel) = selected {
         let np = sections.prs.as_ref().map_or(0, Vec::len);
         let nq = sections.queue.as_ref().map_or(0, Vec::len);
         let nm = sections.merged.as_ref().map_or(0, Vec::len);
         if sel < np {
-            place_caret(prs_table.as_mut(), sel, ascii);
+            prs_sel = place_caret(prs_table.as_mut(), sel, ascii).then_some(sel);
         } else if sel < np + nq {
-            place_caret(queue_table.as_mut(), sel - np, ascii);
+            let local = sel - np;
+            queue_sel = place_caret(queue_table.as_mut(), local, ascii).then_some(local);
         } else if sel < np + nq + nm {
-            place_caret(merged_table.as_mut(), sel - np - nq, ascii);
+            let local = sel - np - nq;
+            merged_sel = place_caret(merged_table.as_mut(), local, ascii).then_some(local);
         } else {
             ship_sel = Some(sel - np - nq - nm);
         }
@@ -492,7 +270,9 @@ fn paint_mine(
     let title_w = title_width(s, [&prs_table, &queue_table, &merged_table]);
 
     let mut y = top;
+    let mut caret = None;
     if let Some(rows) = &sections.prs {
+        caret = caret.or(prs_sel.map(|l| caret_row(y, l)));
         y = paint_section(
             s,
             "My open PRs",
@@ -509,6 +289,7 @@ fn paint_mine(
     if let Some(rows) = &sections.queue {
         // The queue-level ETA (time until a newly added entry would merge) rides
         // alongside the header as a dim note.
+        caret = caret.or(queue_sel.map(|l| caret_row(y, l)));
         let eta = sections.queue_next_eta.map(|secs| {
             format!(
                 "~{} to merge",
@@ -529,6 +310,7 @@ fn paint_mine(
         );
     }
     if let Some(rows) = &sections.merged {
+        caret = caret.or(merged_sel.map(|l| caret_row(y, l)));
         y = paint_section(
             s,
             "My merged PRs",
@@ -543,21 +325,23 @@ fn paint_mine(
         );
     }
     if let Some(stats) = &sections.commits {
-        y = paint_commits(s, stats, ship_sel, ascii, y) + 1;
+        let (next, ship_caret) = paint_commits(s, stats, ship_sel, ascii, y);
+        y = next + 1;
+        caret = caret.or(ship_caret);
     }
-    y
+    (y, caret)
 }
 
 /// The Reviews view: PRs to review (with a per-row review-state glyph), then
 /// merged PRs I reviewed. Their TITLE columns are aligned together. Returns the
-/// next free row.
+/// next free row and the row the selection caret landed on, if any.
 fn paint_reviews(
     s: &mut impl TextSurface,
     sections: &Sections,
     selected: Option<usize>,
     ascii: bool,
     top: u16,
-) -> u16 {
+) -> (u16, Option<u16>) {
     let mut open_table = sections
         .reviews
         .as_ref()
@@ -571,19 +355,23 @@ fn paint_reviews(
 
     // The open reviews come first, then the reviewed & merged rows, so a
     // selection index past the open rows indexes the latter.
+    let (mut open_sel, mut merged_sel) = (None, None);
     if let Some(sel) = selected {
         let nr = sections.reviews.as_ref().map_or(0, Vec::len);
         if sel < nr {
-            place_caret(open_table.as_mut(), sel, ascii);
+            open_sel = place_caret(open_table.as_mut(), sel, ascii).then_some(sel);
         } else {
-            place_caret(merged_table.as_mut(), sel - nr, ascii);
+            let local = sel - nr;
+            merged_sel = place_caret(merged_table.as_mut(), local, ascii).then_some(local);
         }
     }
 
     let title_w = title_width(s, [&open_table, &merged_table]);
 
     let mut y = top;
+    let mut caret = None;
     if let Some(rows) = &sections.reviews {
+        caret = open_sel.map(|l| caret_row(y, l));
         y = paint_section(
             s,
             "Reviews",
@@ -598,6 +386,7 @@ fn paint_reviews(
         );
     }
     if let Some(rows) = &sections.reviewed_merged {
+        caret = caret.or(merged_sel.map(|l| caret_row(y, l)));
         y = paint_section(
             s,
             "Reviewed & merged",
@@ -611,7 +400,7 @@ fn paint_reviews(
             y,
         );
     }
-    y
+    (y, caret)
 }
 
 /// The shared TITLE column width across the present tables of one view.
@@ -620,38 +409,51 @@ fn title_width<const N: usize>(s: &impl TextSurface, tables: [&Option<render::Ta
     render::title_width(s, &present)
 }
 
-/// Paint the whole dashboard onto `s` starting at row 0: the watch-only tab
-/// strip, the active view's sections, then the optional search prompt, `error:`
-/// line, footer, and help legend. Rows that changed since the previous refresh
-/// (per `changes`) are flagged with a leading marker.
+/// Paint the dashboard's body onto `s` from row `top`: the watch-only tab strip
+/// and the active view's sections. Rows that changed since the previous refresh
+/// (per `changes`) are flagged with a leading marker. `tabs` is set only while
+/// watching, since the view switcher is an interactive affordance. `ascii`
+/// selects letters/parens over Nerd Font glyphs/bars; colors are written as
+/// styles and downsampled by the surface's `Profile` at encode/render time.
 ///
-/// `footer` is `Some((interval, refreshing))` only while watching — it also
-/// gates the tab strip, which is an interactive affordance. `ascii` selects
-/// letters/parens over Nerd Font glyphs/bars; colors are written as styles and
-/// downsampled by the surface's `Profile` at encode/render time. Returns the
-/// number of rows used and, while the search prompt is capturing, where the
-/// terminal's own cursor should rest.
-fn paint_dashboard(
+/// Returns the next free row and the row the selection caret landed on — what
+/// the pinned watch frame scrolls to keep in view.
+fn paint_body(
     s: &mut impl TextSurface,
     sections: &Sections,
     ui: &Ui,
     changes: &Changes,
+    ascii: bool,
+    tabs: bool,
+    top: u16,
+) -> (u16, Option<u16>) {
+    let mut y = top;
+    if tabs {
+        y = render::paint_tabs(s, ui.view, ascii, y) + 1;
+    }
+    match ui.view {
+        View::Mine => paint_mine(s, sections, changes, ui.selected, ascii, y),
+        View::Reviews => paint_reviews(s, sections, ui.selected, ascii, y),
+    }
+}
+
+/// Paint the dashboard's bottom block onto `s` from row `top`: the optional
+/// search prompt, `error:` line, footer, and help legend — each separated from
+/// the previous part by one blank row (the body's trailing blank serves as the
+/// first). While watching this block is pinned to the last rows of the screen.
+///
+/// Returns the next free row and, while the search prompt is capturing, where
+/// the terminal's own cursor should rest (relative to `s`).
+fn paint_bottom(
+    s: &mut impl TextSurface,
+    sections: &Sections,
+    ui: &Ui,
     error: &str,
     footer: Option<(&str, bool)>,
     ascii: bool,
+    top: u16,
 ) -> (u16, Option<Position>) {
-    let mut y = 0u16;
-    if footer.is_some() {
-        y = render::paint_tabs(s, ui.view, ascii, y) + 1;
-    }
-    y = match ui.view {
-        View::Mine => paint_mine(s, sections, changes, ui.selected, ascii, y),
-        View::Reviews => paint_reviews(s, sections, ui.selected, ascii, y),
-    };
-
-    // Bottom: search prompt, error line, footer, help — each separated from the
-    // previous part by one blank row (the body's trailing blank serves as the
-    // first).
+    let mut y = top;
     let mut painted = false;
     let mut caret = None;
     if !ui.search.is_empty() || ui.searching {
@@ -686,8 +488,25 @@ fn paint_dashboard(
     (y, caret)
 }
 
-/// A safe upper bound on the dashboard height, used to size a surface before it
-/// is cropped to the painted height.
+/// Paint the body and then the bottom block right under it, as one unpinned
+/// run of rows. Used for one-shot and piped output, and for the inline
+/// interactive frame — anywhere the dashboard is as tall as its content rather
+/// than laid out for a screen of a known height.
+fn paint_dashboard(
+    s: &mut impl TextSurface,
+    sections: &Sections,
+    ui: &Ui,
+    changes: &Changes,
+    error: &str,
+    footer: Option<(&str, bool)>,
+    ascii: bool,
+) -> (u16, Option<Position>) {
+    let (y, _) = paint_body(s, sections, ui, changes, ascii, footer.is_some(), 0);
+    paint_bottom(s, sections, ui, error, footer, ascii, y)
+}
+
+/// A safe upper bound on the dashboard body's height, used to size a surface
+/// before it is cropped to the painted height.
 fn height_bound(s: &Sections, ui: &Ui) -> u16 {
     // Tabs + search + error + footer + slack.
     let mut n = 10usize;
@@ -721,10 +540,26 @@ fn paint_loading(screen: &mut Screen<Stdin, Stdout>) -> Result<()> {
     Ok(())
 }
 
-/// Size an inline/alternate `Screen` to the dashboard's content height, paint it,
-/// crop to the height actually used, and render. Shared by the watch redraw and
-/// the interactive one-shot frame so the sizing dance lives in one place.
+/// A safe upper bound on the bottom block's height (search prompt, error line,
+/// footer, help legend, and the blank row between each).
+fn bottom_bound(ui: &Ui) -> u16 {
+    let mut n = 6usize;
+    if ui.show_help {
+        n += render::help_height(ui.view) + 1;
+    }
+    n as u16
+}
+
+/// Paint the dashboard onto a `Screen` and render it.
+///
+/// `pinned` is the watch layout: the screen is the whole terminal, the bottom
+/// block (search prompt, error line, footer, help) is glued to its last rows,
+/// and the body scrolls under it to keep the selection caret in view. Unpinned
+/// — the inline interactive one-shot — the screen is instead sized to the
+/// dashboard's own height and the two are painted as one run of rows.
+///
 /// Returns the search caret's resting cell, if the prompt is capturing.
+#[allow(clippy::too_many_arguments)]
 fn render_dashboard(
     screen: &mut Screen<Stdin, Stdout>,
     sections: &Sections,
@@ -733,14 +568,35 @@ fn render_dashboard(
     error: &str,
     footer: Option<(&str, bool)>,
     ascii: bool,
+    pinned: bool,
 ) -> Result<Option<Position>> {
-    let w = screen.width().max(1);
-    // Grow tall enough to paint everything, paint, then shrink to the height
-    // actually used so the surface is exactly the dashboard's line count.
-    screen.resize((w, height_bound(sections, ui).max(1)));
-    screen.clear();
-    let (used, caret) = paint_dashboard(screen, sections, ui, changes, error, footer, ascii);
-    screen.resize((w, used.max(1)));
+    let caret = if pinned {
+        // Fill the alternate screen, so the row math below is the terminal's.
+        screen.autoresize()?;
+        let (w, rows) = (screen.width().max(1), screen.height().max(1));
+
+        // Body and bottom are painted into their own buffers because the frame
+        // places them independently: the body may be scrolled, the bottom is
+        // pinned to the last rows.
+        let mut body = TextBuffer::new(w, height_bound(sections, ui).max(1));
+        let (body_h, sel) = paint_body(&mut body, sections, ui, changes, ascii, true, 0);
+        let mut bottom = TextBuffer::new(w, bottom_bound(ui).max(1));
+        let (bottom_h, at) = paint_bottom(&mut bottom, sections, ui, error, footer, ascii, 0);
+
+        screen.clear();
+        let top = render::compose(screen, &mut body, body_h, &mut bottom, bottom_h, rows, sel);
+        // The prompt's caret is relative to the bottom block, which just moved.
+        at.map(|p| Position::new(p.x, top.saturating_add(p.y)))
+    } else {
+        let w = screen.width().max(1);
+        // Grow tall enough to paint everything, paint, then shrink to the height
+        // actually used so the surface is exactly the dashboard's line count.
+        screen.resize((w, (height_bound(sections, ui) + bottom_bound(ui)).max(1)));
+        screen.clear();
+        let (used, caret) = paint_dashboard(screen, sections, ui, changes, error, footer, ascii);
+        screen.resize((w, used.max(1)));
+        caret
+    };
     // Steer the terminal's own cursor to the prompt, so the search line gets a
     // real (blinking, shape-honoring) cursor instead of a painted stand-in.
     match caret {
@@ -753,7 +609,7 @@ fn render_dashboard(
 
 /// Render the dashboard once into an offscreen [`TextBuffer`] sized to its content,
 /// then encode it to the terminal's output with the **detected** color profile
-/// (plain when piped) and exit. Used by `--once`, non-TTY output, and `--demo`.
+/// (plain when piped) and exit. Used by `--once` and non-TTY output.
 fn render_once(
     terminal: &Terminal<Stdin, Stdout>,
     sections: &Sections,
@@ -768,7 +624,7 @@ fn render_once(
     let ui = Ui::once(cli);
 
     let w = render::MAX_WIDTH as u16;
-    let mut canvas = TextBuffer::new(w, height_bound(sections, &ui));
+    let mut canvas = TextBuffer::new(w, height_bound(sections, &ui) + bottom_bound(&ui));
     // One-shot output never searches, so there is no caret to place.
     let (used, _) = paint_dashboard(&mut canvas, sections, &ui, changes, "", footer, ascii);
     canvas.resize(w, used.max(1));
@@ -865,6 +721,7 @@ fn run_once_interactive(
                 "",
                 None,
                 cli.ascii,
+                false,
             )?;
             screen.finish()?;
             if !cli.no_cache {
@@ -891,16 +748,17 @@ fn run_once_interactive(
 /// row each with the labels right-aligned so the colons and counts line up. Each
 /// label links out — the upcoming one to the compare log, each release to its
 /// release page — and shipped releases also show how long ago they were
-/// published, aligned into a trailing column. Returns the next row.
+/// published, aligned into a trailing column. Returns the next row and the row
+/// the selection caret was painted on, if any.
 fn paint_commits(
     s: &mut impl TextSurface,
     stats: &commits::CommitStats,
     selected: Option<usize>,
     ascii: bool,
     top: u16,
-) -> u16 {
+) -> (u16, Option<u16>) {
     if !stats.available {
-        return render::paint_dim(s, "Commit stats unavailable.", top);
+        return (render::paint_dim(s, "Commit stats unavailable.", top), None);
     }
     let count = |c: &commits::Count| format!("{}{}", c.mine, if c.capped { "+" } else { "" });
 
@@ -965,6 +823,7 @@ fn paint_commits(
     // caret row down by one.
     let sel_row = selected.map(|k| if stats.upcoming.is_some() { k } else { k + 1 });
 
+    let mut caret = None;
     for (i, (label, url, value, age)) in rows.iter().enumerate() {
         // The first row is the upcoming (unreleased) version; set it apart in
         // italics. The label links to the bucket's log/release page.
@@ -980,8 +839,9 @@ fn paint_commits(
         // A 2-column leading gutter holds the caret on the selected row, so the
         // labels stay aligned with or without one.
         if Some(i) == sel_row {
-            let caret = render::select_marker(ascii);
-            s.set_str((0, y), &caret.text, &caret.style);
+            let marker = render::select_marker(ascii);
+            s.set_str((0, y), &marker.text, &marker.style);
+            caret = Some(y);
         }
         let x = (2 + label_w - s.str_width(label) as usize) as u16;
         let p = s.set_str((x, y), &cell.text, &cell.style);
@@ -992,7 +852,7 @@ fn paint_commits(
         }
         y += 1;
     }
-    y
+    (y, caret)
 }
 
 /// First line of an error, truncated, for the one-line error status.
@@ -1181,25 +1041,6 @@ pub fn run() -> Result<()> {
     // whenever there's a terminal.
     let terminal = Terminal::stdio();
     let interactive = terminal.is_terminal().1;
-
-    // `--demo`: render synthetic data once and exit (no auth/repo/network), so
-    // the dashboard can be screenshotted. Colored on a TTY, plain when piped.
-    #[cfg(feature = "demo")]
-    if cli.demo {
-        let sections = demo_sections();
-        let changes = Changes {
-            status_changed: std::collections::HashSet::from([127]),
-            newly_merged: std::collections::HashSet::from([119]),
-        };
-        let next = timefmt::eta(cli.interval.dur);
-        return render_once(
-            &terminal,
-            &sections,
-            &cli,
-            &changes,
-            Some((next.as_str(), false)),
-        );
-    }
 
     // Authenticate first (this may run the interactive device flow and print
     // prompts, so it must happen before we enter the alternate screen).
@@ -1393,6 +1234,9 @@ impl<'a> App<'a> {
             &self.last_error,
             Some((self.eta.as_str(), self.refreshing)),
             self.cli.ascii,
+            // Pinning lays the frame out for a screen of a known height, which
+            // is only true once we own the alternate screen.
+            self.in_alt,
         )?;
         // Reveal the cursor only once it's parked in the prompt, so it never
         // blinks at a stale cell.
