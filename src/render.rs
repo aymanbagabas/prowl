@@ -300,8 +300,8 @@ pub fn select_marker(ascii: bool) -> Cell {
 /// The help legend for `view`: only the glyphs and values that view actually
 /// uses, so a glyph the other view reuses for something else can't muddy it. The
 /// Mine view lists the status glyphs + every `mergeStateStatus` value; the
-/// Reviews view lists the review-state glyphs + the merged glyph (its only
-/// shared icon). The title reuses the section-header style; meanings are dim.
+/// Reviews view lists the review-state glyphs. The title reuses the
+/// section-header style; meanings are dim.
 pub fn help(view: View, ascii: bool, styled: bool) -> String {
     let dim = Style::new().dimmed();
     let mut out = String::new();
@@ -395,14 +395,6 @@ pub fn help(view: View, ascii: bool, styled: bool) -> String {
                     status::review_meaning(r),
                 );
             }
-            // The "Reviewed & merged" section leads each row with the merged glyph.
-            let merged = status::Status::Merged;
-            line(
-                &mut out,
-                status::glyph(merged, ascii),
-                status::status_style(merged).1,
-                status::status_meaning(merged),
-            );
         }
     }
     out

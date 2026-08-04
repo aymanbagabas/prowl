@@ -1,10 +1,10 @@
 //! Recently-merged view: rows, sorting, styling, and table building. Every row
-//! leads with the shared `merged` palette glyph (branch, mauve).
+//! in the section is merged by definition, so it carries no per-row glyph.
 
 use crate::commits::{ReleaseMap, ReleaseRef};
 use crate::model::MergedNode;
 use crate::render::{self, Cell, Table};
-use crate::status::{self, BLUE, MAUVE, Status};
+use crate::status::{self, BLUE};
 use crate::timefmt;
 use anstyle::Style;
 use std::collections::HashSet;
@@ -43,7 +43,6 @@ pub fn build_rows(nodes: Vec<MergedNode>, limit: usize, releases: &ReleaseMap) -
 }
 
 pub fn to_table(rows: &[MergedRow], ascii: bool, highlight: &HashSet<i64>) -> Table {
-    let glyph = status::glyph(Status::Merged, ascii);
     let dim = Style::new().dimmed();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
@@ -54,7 +53,9 @@ pub fn to_table(rows: &[MergedRow], ascii: bool, highlight: &HashSet<i64>) -> Ta
         };
         out.push(vec![
             render::change_marker(highlight.contains(&r.number), ascii),
-            Cell::styled(glyph.to_string(), status::fg(MAUVE)),
+            // Blank spacer where the open-PRs table has its mergeability glyph,
+            // so both tables' PR/TITLE columns start at the same screen column.
+            Cell::plain(" "),
             Cell::link_styled(format!("#{}", r.number), r.url.clone(), status::fg(BLUE)),
             Cell::plain(r.title.clone()),
             release,

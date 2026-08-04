@@ -4,7 +4,7 @@
 
 use crate::model::{MergedNode, ReviewPrNode, ReviewsData};
 use crate::render::{self, Cell, Table};
-use crate::status::{self, BLUE, MAUVE, ReviewState, Status};
+use crate::status::{self, BLUE, ReviewState};
 use crate::timefmt;
 use anstyle::Style;
 use std::collections::{HashMap, HashSet};
@@ -169,13 +169,15 @@ pub fn build_merged_rows(nodes: Vec<MergedNode>, limit: usize) -> Vec<ReviewedMe
 }
 
 pub fn merged_to_table(rows: &[ReviewedMergedRow], ascii: bool) -> Table {
-    let glyph = status::glyph(Status::Merged, ascii);
     let dim = Style::new().dimmed();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         out.push(vec![
+            // Two blank margin columns keep this table aligned with the open
+            // reviews table (marker + state glyph); every row here is merged, so
+            // a per-row glyph would say nothing.
             Cell::plain(" "),
-            Cell::styled(glyph.to_string(), status::fg(MAUVE)),
+            Cell::plain(" "),
             Cell::link_styled(format!("#{}", r.number), r.url.clone(), status::fg(BLUE)),
             Cell::plain(r.title.clone()),
             Cell::styled(render::truncate(&r.author, AUTHOR_WIDTH, ascii), dim),

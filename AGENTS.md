@@ -85,7 +85,7 @@ everything else is testable modules:
   `/` query with a block cursor + match count), help
   legend (`help(view, …)` — a movement-keys line then, contextual: status glyphs
   + every `STATE` value for
-  Mine, review glyphs + the merged glyph for Reviews; last at the very bottom),
+  Mine, review glyphs for Reviews; last at the very bottom),
   loading screen, bell, clear. It also owns the watch-mode screen: the
   `ENTER_SCREEN` / `LEAVE_SCREEN` sequences (alternate screen + autowrap off +
   cursor hidden, and their exact reverse), and `frame(body, bottom, rows,
@@ -110,7 +110,9 @@ everything else is testable modules:
   integrations). The `Merge Queue` header also carries the queue-level ETA
   (`~11m to merge`, from `mergeQueue.nextEntryEstimatedTimeToMerge`) as a dim
   note. The
-  merged columns are `# PR TITLE RELEASE MERGED`, where `RELEASE` is the release
+  merged columns are `[mark] [ ] PR TITLE RELEASE MERGED` (no per-row glyph —
+  every row there is merged; the blank second column just keeps the tables
+  aligned), where `RELEASE` is the release
   that shipped the PR (a link to its release page) or `—` if not yet shipped,
   looked up from the `commits::ReleaseMap`.
 - `reviews.rs` — the Reviews view's rows/tables. `ReviewRow` (open: `glyph PR
