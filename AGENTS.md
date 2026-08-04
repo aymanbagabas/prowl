@@ -88,8 +88,8 @@ everything else is testable modules:
   interval and `enter open` / `/ search` hints), the `search_prompt` line (the
   `/` query with a block cursor + match count), help
   legend (`help(view, …)` — a movement-keys line then, contextual: the
-  mergeability glyphs + the FAIL/RUN/PASS/THREADS column meanings for Mine,
-  review glyphs for Reviews; last at the very bottom),
+  mergeability glyphs for Mine, review glyphs for Reviews; the column headers
+  speak for themselves and are not repeated; last at the very bottom),
   loading screen, bell, clear. It also owns the watch-mode screen: the
   `ENTER_SCREEN` / `LEAVE_SCREEN` sequences (alternate screen + autowrap off +
   cursor hidden, and their exact reverse), and `frame(body, bottom, rows,
@@ -239,9 +239,8 @@ everything else is testable modules:
   dashboard nor
   spill into the shell; signal keys (Ctrl-C/Ctrl-Z) still fire. `r`/`R` forces a
   refresh now; `Tab` switches view; `?` toggles the help legend
-  (contextual to the active view — mergeability glyphs + the check/thread column
-  meanings for Mine, review glyphs for Reviews — hidden by default, rendered last at the very
-  bottom; `--no-help` only affects one-shot/piped output). The movement keys
+  (contextual to the active view — mergeability glyphs for Mine, review glyphs
+  for Reviews — hidden by default, rendered last at the very bottom; `--no-help` only affects one-shot/piped output). The movement keys
   (`j`/`k`, arrows, `g`/`G`, `Ctrl-D`/`Ctrl-U`) drive the selection cursor,
   Enter opens it, and `/` filters (Esc clears). The bottom block — search
   prompt, error line, footer, help legend — is glued to the last rows of the

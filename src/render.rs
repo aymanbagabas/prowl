@@ -307,10 +307,10 @@ pub fn select_marker(ascii: bool) -> Cell {
     Cell::styled(m, status::fg(status::PEACH).bold())
 }
 
-/// The help legend for `view`: only the glyphs and values that view actually
-/// uses, so a glyph the other view reuses for something else can't muddy it. The
-/// Mine view lists the mergeability glyphs plus the check-semaphore / review
-/// thread columns; the Reviews view lists the review-state glyphs. The title
+/// The help legend for `view`: only the glyphs that view actually uses, so a
+/// glyph the other view reuses for something else can't muddy it. The Mine view
+/// lists the mergeability glyphs, the Reviews view the review-state glyphs. The
+/// column headers explain themselves, so they are not repeated here. The title
 /// reuses the section-header style; meanings are dim.
 pub fn help(view: View, ascii: bool, styled: bool) -> String {
     let dim = Style::new().dimmed();
@@ -356,30 +356,6 @@ pub fn help(view: View, ascii: bool, styled: bool) -> String {
                     status::mergeable_style(m).1,
                     status::mergeable_meaning(m),
                 );
-            }
-            // The detail columns: what a blocked PR is waiting on.
-            let cols = [
-                ("FAIL", status::RED, "check runs that failed"),
-                ("RUN", status::YELLOW, "check runs still going"),
-                ("PASS", status::GREEN, "check runs that passed"),
-                ("THREADS", status::PEACH, "unresolved review threads"),
-            ];
-            let width = cols.iter().map(|(l, ..)| l.len()).max().unwrap_or(0);
-            for (label, color, meaning) in cols {
-                let c = status::fg(color);
-                let pad = " ".repeat(width - label.len());
-                if styled {
-                    let _ = writeln!(
-                        out,
-                        "  {}{label}{}{pad}  {}{meaning}{}",
-                        c.render(),
-                        c.render_reset(),
-                        dim.render(),
-                        dim.render_reset()
-                    );
-                } else {
-                    let _ = writeln!(out, "  {label}{pad}  {meaning}");
-                }
             }
         }
         View::Reviews => {
