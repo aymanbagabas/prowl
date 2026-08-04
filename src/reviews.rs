@@ -106,6 +106,12 @@ pub fn build_open_rows(data: ReviewsData) -> Vec<ReviewRow> {
     rows
 }
 
+/// Drop draft PRs (`--no-draft`).
+pub fn without_drafts(mut rows: Vec<ReviewRow>) -> Vec<ReviewRow> {
+    rows.retain(|r| !r.is_draft);
+    rows
+}
+
 pub fn open_to_table(rows: &[ReviewRow], ascii: bool) -> Table {
     let dim = Style::new().dimmed();
     let mut out = Vec::with_capacity(rows.len());

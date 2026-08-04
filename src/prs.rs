@@ -79,6 +79,12 @@ pub fn without_queued(mut rows: Vec<PrRow>) -> Vec<PrRow> {
     rows
 }
 
+/// Drop draft PRs (`--no-draft`).
+pub fn without_drafts(mut rows: Vec<PrRow>) -> Vec<PrRow> {
+    rows.retain(|r| !r.is_draft);
+    rows
+}
+
 /// One lamp of the check semaphore: dim when zero, its palette color (bold)
 /// when not, so only the counts that matter catch the eye.
 fn lamp_cell(n: u64, lamp: Lamp) -> Cell {
@@ -282,6 +288,15 @@ mod tests {
         let open = pr(2, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)]);
         // #1 is queued, #2 isn't — only #2 remains in the open-PRs list.
         let rows = without_queued(build_rows(vec![queued, open]));
+        assert_eq!(rows.iter().map(|r| r.number).collect::<Vec<_>>(), [2]);
+    }
+
+    #[test]
+    fn without_drafts_drops_draft_prs() {
+        let mut draft = pr(1, "MERGEABLE", "DRAFT", &[]);
+        draft.is_draft = true;
+        let ready = pr(2, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)]);
+        let rows = without_drafts(build_rows(vec![draft, ready]));
         assert_eq!(rows.iter().map(|r| r.number).collect::<Vec<_>>(), [2]);
     }
 

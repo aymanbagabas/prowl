@@ -79,6 +79,10 @@ pub struct Cli {
     #[arg(long)]
     pub branch: bool,
 
+    /// Hide draft pull requests.
+    #[arg(long)]
+    pub no_draft: bool,
+
     /// Hide the help legend in one-shot/piped output (in the watch view it
     /// starts hidden and is toggled with `?`).
     #[arg(long)]

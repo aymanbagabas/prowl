@@ -119,6 +119,11 @@ fn fetch(
         } else {
             rows
         };
+        let rows = if cli.no_draft {
+            prs::without_drafts(rows)
+        } else {
+            rows
+        };
         Some(rows)
     } else {
         None
@@ -129,6 +134,11 @@ fn fetch(
     let (reviews, reviewed_merged) = if want_reviews {
         let data = model::fetch_reviews(client, repo, me, cli.review_scope.qualifier())?;
         let open = reviews::build_open_rows(data);
+        let open = if cli.no_draft {
+            reviews::without_drafts(open)
+        } else {
+            open
+        };
         let since = timefmt::since_date(&cli.merged_window);
         let merged_nodes =
             model::fetch_reviewed_merged(client, repo, me, &since, cli.merged_limit)?;

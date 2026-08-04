@@ -30,8 +30,8 @@ twice.
 
 On a TTY prowl uses Nerd Font icons; with `--ascii` (or when piped) the
 mergeability glyph falls back to `y` ready, `n` blocked, `!` conflicts, `?`
-unknown. `--branch` adds the PR's head branch as a column. Each PR number is a
-clickable link to the PR. Long titles are
+unknown. `--branch` adds the PR's head branch as a column, and `--no-draft`
+hides drafts. Each PR number is a clickable link to the PR. Long titles are
 truncated (with a `⋯`) and the whole view is kept within 120 columns.
 
 ## Install
@@ -82,5 +82,5 @@ release tag; `Enter` applies the filter and drops you back to the list (so the
 cursor and `Enter` work on the matches), and `Esc` clears it.
 
 Run `prowl --help` for all flags (interval, `--only`, `--view`,
-`--review-scope`, `--branch`, merged window, etc.) and the full
+`--review-scope`, `--branch`, `--no-draft`, merged window, etc.) and the full
 watch-mode key list.

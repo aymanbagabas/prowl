@@ -107,7 +107,7 @@ everything else is testable modules:
   single mergeability glyph, `FAIL`/`RUN`/`PASS` are the check-run semaphore
   (always all three, dim when zero, colored when not) and `THREADS` the
   unresolved review threads (`100+` when the page was capped). `--branch` adds
-  the `BRANCH` column. The queue
+  `BRANCH` (`prs::without_drafts` backs `--no-draft`). The queue
   columns are `# PR TITLE AUTHOR WAIT BUILD` (author truncated to
   `AUTHOR_WIDTH`), where `WAIT` is how long the entry has been queued (now −
   `enqueuedAt`) and `BUILD` is how long its speculative merge commit has been
@@ -187,6 +187,8 @@ everything else is testable modules:
 - **Queue dedup:** a PR of mine that's in the merge queue is shown only in the
   Merge Queue section, not the open-PRs list (`prs::without_queued`, applied when
   the queue section is shown so `--only mine` still lists it).
+- **Drafts:** `--no-draft` hides draft PRs from both the Mine open-PRs list and
+  the Reviews list (`prs::without_drafts` / `reviews::without_drafts`).
 - **Views / Tab:** two views, `Mine` (default) and `Reviews`, selected for
   one-shot output with `--view` and toggled live with `Tab`. While watching,
   prowl fetches **both** views every refresh so Tab switches instantly from
