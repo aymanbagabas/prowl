@@ -108,15 +108,18 @@ everything else is testable modules:
   (always all three, dim when zero, colored when not) and `THREADS` the
   unresolved review threads (`100+` when the page was capped). `--branch` adds
   `BRANCH` (`prs::without_drafts` backs `--no-draft`). The queue
-  columns are `# PR TITLE AUTHOR WAIT BUILD` (author truncated to
+  columns are `# PR TITLE AUTHOR WAIT BUILD FAIL RUN PASS` (author truncated to
   `AUTHOR_WIDTH`), where `WAIT` is how long the entry has been queued (now −
   `enqueuedAt`) and `BUILD` is how long its speculative merge commit has been
   building — now − the earliest check-run `startedAt` in the commit's
   `statusCheckRollup.contexts` (`QueueEntryNode::build_started_at`), or `—` until
   a check actually starts running (still queued, or no speculative commit /
-  checks). The rollup is a single flat connection (cheap, and front-loads the
-  real check runs, unlike `checkSuites` whose first entries are app
-  integrations). The `Merge Queue` header also carries the queue-level ETA
+  checks). `FAIL`/`RUN`/`PASS` is the same check semaphore as the open-PRs table
+  (`render::lamp_cell`), counting the speculative merge commit's checks from the
+  rollup's own `checkRunCountsByState` / `statusContextCountsByState` aggregates
+  (`QueueEntryNode::checks`). The rollup is a single flat connection (cheap, and
+  front-loads the real check runs, unlike `checkSuites` whose first entries are
+  app integrations). The `Merge Queue` header also carries the queue-level ETA
   (`~11m to merge`, from `mergeQueue.nextEntryEstimatedTimeToMerge`) as a dim
   note. The
   merged columns are `[mark] [ ] PR TITLE RELEASE MERGED` (no per-row glyph —
@@ -266,8 +269,10 @@ everything else is testable modules:
 
 - Merge queue: `repository.mergeQueue.entries` (vars `owner`, `name`), each
   entry carrying `enqueuedAt` (WAIT) and `headCommit.statusCheckRollup.contexts`
-  check-run `startedAt` timestamps (BUILD = now − the earliest), plus the
-  queue-level `nextEntryEstimatedTimeToMerge` (the header ETA).
+  check-run `startedAt` timestamps (BUILD = now − the earliest) plus that same
+  connection's `checkRunCountsByState` / `statusContextCountsByState` aggregates
+  (the FAIL/RUN/PASS semaphore), plus the queue-level
+  `nextEntryEstimatedTimeToMerge` (the header ETA).
 - Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
   `mergeStateStatus`, `mergeQueueEntry`, `headRefName`, `updatedAt`,
   `reviewThreads(first: 100) { totalCount nodes { isResolved } }` (no unresolved

@@ -28,6 +28,9 @@ right: a red/yellow/green **check semaphore** (`FAIL` / `RUN` / `PASS` check-run
 counts) and the number of unresolved review **threads**. Nothing is reported
 twice.
 
+Merge-queue entries get the same semaphore for their speculative merge commit,
+next to how long they've been queued and how long that build has been running.
+
 On a TTY prowl uses Nerd Font icons; with `--ascii` (or when piped) the
 mergeability glyph falls back to `y` ready, `n` blocked, `!` conflicts, `?`
 unknown. `--branch` adds the PR's head branch as a column, and `--no-draft`

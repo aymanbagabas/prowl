@@ -22,6 +22,8 @@ pub const QUEUE_QUERY: &str = r#"query($owner: String!, $name: String!) {
           headCommit {
             statusCheckRollup {
               contexts(first: 40) {
+                checkRunCountsByState { state count }
+                statusContextCountsByState { state count }
                 nodes { ... on CheckRun { startedAt } }
               }
             }
@@ -89,6 +91,12 @@ pub struct QueueRollup {
 
 #[derive(Debug, Deserialize)]
 pub struct QueueContexts {
+    /// GitHub's own per-state check-run counts: exact and unpaginated, unlike
+    /// `nodes` (which is capped and only read for the earliest `startedAt`).
+    #[serde(rename = "checkRunCountsByState", default)]
+    pub check_runs: Vec<StateCount>,
+    #[serde(rename = "statusContextCountsByState", default)]
+    pub status_contexts: Vec<StateCount>,
     pub nodes: Vec<QueueContext>,
 }
 
@@ -106,6 +114,27 @@ impl QueueEntryNode {
     /// speculative commit / no checks), which the BUILD column renders as a
     /// dash. RFC 3339 `...Z` timestamps sort lexically == chronologically, so
     /// `min` is earliest.
+    /// Failing / running / passing checks on the speculative merge commit —
+    /// the queue's own CI semaphore. Empty when the entry has no speculative
+    /// commit or no checks yet.
+    pub fn checks(&self) -> Checks {
+        let mut c = Checks::default();
+        let Some(rollup) = self
+            .head_commit
+            .as_ref()
+            .and_then(|h| h.status_check_rollup.as_ref())
+        else {
+            return c;
+        };
+        for sc in &rollup.contexts.check_runs {
+            c.add(status::check_run_lamp(&sc.state), sc.count);
+        }
+        for sc in &rollup.contexts.status_contexts {
+            c.add(status::status_context_lamp(&sc.state), sc.count);
+        }
+        c
+    }
+
     pub fn build_started_at(&self) -> Option<String> {
         self.head_commit
             .as_ref()?

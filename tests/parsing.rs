@@ -35,6 +35,39 @@ fn queue_parses_orders_and_flags_mine() {
 }
 
 #[test]
+fn queue_counts_speculative_build_checks() {
+    let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
+    let rows = queue::build_rows(model_queue_nodes(data), "caarlos0");
+
+    // #101: 1 failing + 3 running + 6 passing check runs, plus one passing
+    // legacy status context folded into the same semaphore.
+    assert_eq!(
+        rows[0].checks,
+        Checks {
+            fail: 1,
+            running: 3,
+            pass: 7,
+        }
+    );
+    // #102 has nothing failing.
+    assert_eq!(
+        rows[1].checks,
+        Checks {
+            fail: 0,
+            running: 2,
+            pass: 8,
+        }
+    );
+    // #103's speculative commit has no checks at all.
+    assert_eq!(rows[2].checks, Checks::default());
+
+    let out = render::render_table(&queue::to_table(&rows, true), false);
+    assert!(out.contains("FAIL"));
+    assert!(out.contains("RUN"));
+    assert!(out.contains("PASS"));
+}
+
+#[test]
 fn queue_null_and_empty_both_yield_no_rows() {
     let null: QueueData = parse(include_str!("fixtures/queue_null.json"));
     let empty: QueueData = parse(include_str!("fixtures/queue_empty.json"));

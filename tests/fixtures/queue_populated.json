@@ -11,9 +11,24 @@
               "headCommit": {
                 "statusCheckRollup": {
                   "contexts": {
+                    "checkRunCountsByState": [
+                      {
+                        "state": "SUCCESS",
+                        "count": 8
+                      },
+                      {
+                        "state": "IN_PROGRESS",
+                        "count": 2
+                      }
+                    ],
+                    "statusContextCountsByState": [],
                     "nodes": [
-                      { "startedAt": "2026-06-19T12:02:00Z" },
-                      { "startedAt": "2026-06-19T11:59:00Z" }
+                      {
+                        "startedAt": "2026-06-19T12:02:00Z"
+                      },
+                      {
+                        "startedAt": "2026-06-19T11:59:00Z"
+                      }
                     ]
                   }
                 }
@@ -22,7 +37,9 @@
                 "number": 102,
                 "title": "feat: add the widget",
                 "url": "https://github.com/octo/repo/pull/102",
-                "author": { "login": "octocat" }
+                "author": {
+                  "login": "octocat"
+                }
               }
             },
             {
@@ -31,10 +48,34 @@
               "headCommit": {
                 "statusCheckRollup": {
                   "contexts": {
+                    "checkRunCountsByState": [
+                      {
+                        "state": "FAILURE",
+                        "count": 1
+                      },
+                      {
+                        "state": "IN_PROGRESS",
+                        "count": 3
+                      },
+                      {
+                        "state": "SUCCESS",
+                        "count": 6
+                      }
+                    ],
+                    "statusContextCountsByState": [
+                      {
+                        "state": "SUCCESS",
+                        "count": 1
+                      }
+                    ],
                     "nodes": [
                       {},
-                      { "startedAt": "2026-06-19T11:58:00Z" },
-                      { "startedAt": "2026-06-19T12:05:00Z" }
+                      {
+                        "startedAt": "2026-06-19T11:58:00Z"
+                      },
+                      {
+                        "startedAt": "2026-06-19T12:05:00Z"
+                      }
                     ]
                   }
                 }
@@ -43,7 +84,9 @@
                 "number": 101,
                 "title": "fix: flaky integration test",
                 "url": "https://github.com/octo/repo/pull/101",
-                "author": { "login": "caarlos0" }
+                "author": {
+                  "login": "caarlos0"
+                }
               }
             },
             {
@@ -52,7 +95,14 @@
               "headCommit": {
                 "statusCheckRollup": {
                   "contexts": {
-                    "nodes": [{}, { "startedAt": null }]
+                    "checkRunCountsByState": [],
+                    "statusContextCountsByState": [],
+                    "nodes": [
+                      {},
+                      {
+                        "startedAt": null
+                      }
+                    ]
                   }
                 }
               },

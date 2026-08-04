@@ -85,16 +85,6 @@ pub fn without_drafts(mut rows: Vec<PrRow>) -> Vec<PrRow> {
     rows
 }
 
-/// One lamp of the check semaphore: dim when zero, its palette color (bold)
-/// when not, so only the counts that matter catch the eye.
-fn lamp_cell(n: u64, lamp: Lamp) -> Cell {
-    if n == 0 {
-        Cell::styled("0".to_string(), Style::new().dimmed())
-    } else {
-        Cell::styled(n.to_string(), status::fg(status::lamp_color(lamp)).bold())
-    }
-}
-
 pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>, show_branch: bool) -> Table {
     let dim = Style::new().dimmed();
     let mut out = Vec::with_capacity(rows.len());
@@ -126,9 +116,9 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>, show_bran
             ));
         }
         row.extend([
-            lamp_cell(r.checks.fail, Lamp::Fail),
-            lamp_cell(r.checks.running, Lamp::Running),
-            lamp_cell(r.checks.pass, Lamp::Pass),
+            render::lamp_cell(r.checks.fail, Lamp::Fail),
+            render::lamp_cell(r.checks.running, Lamp::Running),
+            render::lamp_cell(r.checks.pass, Lamp::Pass),
             threads,
         ]);
         out.push(row);

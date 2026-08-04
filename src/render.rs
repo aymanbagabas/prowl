@@ -3,7 +3,7 @@
 //! gated on a `styled` flag, so piped / non-TTY output is plain text.
 
 use crate::cli::View;
-use crate::status::{self, Rgb};
+use crate::status::{self, Lamp, Rgb};
 use anstyle::Style;
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -12,6 +12,16 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// The whole dashboard is kept within this many display columns; the flexible
 /// title column is truncated (with an ellipsis) to make every table fit.
 pub const MAX_WIDTH: usize = 120;
+
+/// One lamp of the check semaphore: dim when zero, its palette color (bold)
+/// when not, so only the counts that matter catch the eye.
+pub fn lamp_cell(n: u64, lamp: Lamp) -> Cell {
+    if n == 0 {
+        Cell::styled("0".to_string(), Style::new().dimmed())
+    } else {
+        Cell::styled(n.to_string(), status::fg(status::lamp_color(lamp)).bold())
+    }
+}
 
 /// One table cell: visible text plus how to style and (optionally) link it.
 #[derive(Clone, Debug)]

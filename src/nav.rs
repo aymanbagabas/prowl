@@ -224,6 +224,7 @@ mod tests {
             mine: true,
             enqueued_at: None,
             build_started_at: None,
+            checks: crate::status::Checks::default(),
         }
     }
 
