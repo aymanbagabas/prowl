@@ -11,7 +11,7 @@ interval. It has two **views**, toggled with **Tab** (and chosen for one-shot
 output with `--view`):
 
 - **Mine** (default): **My open PRs → Merge Queue → My merged PRs → My
-  Shipments**.
+  Shipments** (headers accented green / peach / mauve / blue respectively).
 - **Reviews**: **Reviews** (open PRs awaiting / under my review, each with a
   per-row review-state glyph) **→ Reviewed & merged** (merged PRs I reviewed).
 

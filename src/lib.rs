@@ -437,7 +437,7 @@ fn render_mine(
     if let Some(rows) = &s.prs {
         section(
             f,
-            ("My open PRs", status::LAVENDER),
+            ("My open PRs", status::GREEN),
             rows.len(),
             None,
             "No open PRs.",
@@ -457,7 +457,7 @@ fn render_mine(
         });
         section(
             f,
-            ("Merge Queue", status::BLUE),
+            ("Merge Queue", status::PEACH),
             rows.len(),
             eta.as_deref(),
             "No merge queue.",
@@ -630,7 +630,7 @@ fn render_commits(
     let total = format!("{total}{}", if capped { "+" } else { "" });
     f.push_str(&render::header(
         "My Shipments",
-        status::TEAL,
+        status::BLUE,
         Some(&total),
         None,
         styled,
