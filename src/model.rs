@@ -169,7 +169,7 @@ pub const MINE_QUERY: &str = r#"query($q: String!) {
   search(type: ISSUE, first: 50, query: $q) {
     nodes {
       ... on PullRequest {
-        number title url mergeable mergeStateStatus isDraft updatedAt
+        number title url mergeable mergeStateStatus isDraft updatedAt headRefName
         mergeQueueEntry { position state }
         reviewThreads(first: 100) { totalCount nodes { isResolved } }
         commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 1) {
@@ -203,6 +203,9 @@ pub struct PrNode {
     pub is_draft: bool,
     #[serde(rename = "updatedAt")]
     pub updated_at: Option<String>,
+    /// The PR's head branch, shown by `--branch`.
+    #[serde(rename = "headRefName")]
+    pub head_ref_name: Option<String>,
     #[serde(rename = "mergeQueueEntry")]
     pub merge_queue_entry: Option<QueueEntry>,
     #[serde(rename = "reviewThreads")]

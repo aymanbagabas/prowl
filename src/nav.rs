@@ -202,6 +202,7 @@ mod tests {
             number: n,
             is_draft: false,
             title: format!("pr {n}"),
+            branch: format!("b/{n}"),
             mergeable: crate::status::Mergeable::Ready,
             status: None,
             checks: crate::status::Checks::default(),

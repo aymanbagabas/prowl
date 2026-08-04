@@ -103,10 +103,11 @@ everything else is testable modules:
   scrolls the screen — no clear, no flicker.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
   Each row's PR number is the OSC-8 link (no separate URL column). The open-PRs
-  columns are `[mark] [M] PR TITLE FAIL RUN PASS THREADS`: `M` is the
+  columns are `[mark] [M] PR TITLE [BRANCH] FAIL RUN PASS THREADS`: `M` is the
   single mergeability glyph, `FAIL`/`RUN`/`PASS` are the check-run semaphore
   (always all three, dim when zero, colored when not) and `THREADS` the
-  unresolved review threads (`100+` when the page was capped). The queue
+  unresolved review threads (`100+` when the page was capped). `--branch` adds
+  the `BRANCH` column. The queue
   columns are `# PR TITLE AUTHOR WAIT BUILD` (author truncated to
   `AUTHOR_WIDTH`), where `WAIT` is how long the entry has been queued (now −
   `enqueuedAt`) and `BUILD` is how long its speculative merge commit has been
@@ -266,7 +267,7 @@ everything else is testable modules:
   check-run `startedAt` timestamps (BUILD = now − the earliest), plus the
   queue-level `nextEntryEstimatedTimeToMerge` (the header ETA).
 - Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
-  `mergeStateStatus`, `mergeQueueEntry`, `updatedAt`,
+  `mergeStateStatus`, `mergeQueueEntry`, `headRefName`, `updatedAt`,
   `reviewThreads(first: 100) { totalCount nodes { isResolved } }` (no unresolved
   aggregate exists, hence the page + a `+` when capped), and the last commit's
   `statusCheckRollup { contexts(first: 1) { checkRunCountsByState

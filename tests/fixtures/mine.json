@@ -10,6 +10,7 @@
           "mergeStateStatus": "DIRTY",
           "isDraft": false,
           "updatedAt": "2026-08-04T01:09:18Z",
+          "headRefName": "goreleaser-install-script",
           "mergeQueueEntry": null,
           "reviewThreads": {
             "totalCount": 0,
@@ -116,6 +117,7 @@
           "mergeStateStatus": "DIRTY",
           "isDraft": false,
           "updatedAt": "2026-08-04T01:05:55Z",
+          "headRefName": "artifacts-vars",
           "mergeQueueEntry": null,
           "reviewThreads": {
             "totalCount": 0,
@@ -139,6 +141,7 @@
           "mergeStateStatus": "BLOCKED",
           "isDraft": false,
           "updatedAt": "2026-08-04T01:05:28Z",
+          "headRefName": "allow-deprecations",
           "mergeQueueEntry": null,
           "reviewThreads": {
             "totalCount": 0,

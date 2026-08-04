@@ -10,6 +10,7 @@
           "mergeStateStatus": "CLEAN",
           "isDraft": false,
           "updatedAt": "2026-06-19T12:00:00Z",
+          "headRefName": "fix/null",
           "mergeQueueEntry": null,
           "reviewThreads": {
             "totalCount": 0,

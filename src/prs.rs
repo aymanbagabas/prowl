@@ -1,7 +1,8 @@
 //! My-open-PRs view: rows, sorting, styling, and table building.
 //!
 //! One row is: a change marker, a single mergeability glyph (the whole "can I
-//! merge this?" answer), the PR number + title, and then the detail group that explains a blocked PR — a failing/running/passing check
+//! merge this?" answer), the PR number + title, an optional branch, and then the
+//! detail group that explains a blocked PR — a failing/running/passing check
 //! semaphore and the unresolved-review-thread count. Conflicts are *only* the
 //! glyph's job, so nothing is reported twice.
 
@@ -11,11 +12,16 @@ use crate::status::{self, BLUE, Checks, Lamp, Mergeable, PEACH, Status};
 use anstyle::Style;
 use std::collections::HashSet;
 
+/// Branch names are truncated to this many display columns.
+const BRANCH_WIDTH: usize = 28;
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrRow {
     pub number: i64,
     pub is_draft: bool,
     pub title: String,
+    /// Head branch, rendered only with `--branch`.
+    pub branch: String,
     /// The leading glyph: whether GitHub would let this merge right now.
     pub mergeable: Mergeable,
     /// Coarse CI/merge state; not rendered, it is the bell's change key.
@@ -50,6 +56,7 @@ pub fn build_rows(nodes: Vec<PrNode>) -> Vec<PrRow> {
                 unresolved_capped,
                 queue: pr.merge_queue_entry.map(|e| (e.position, e.state)),
                 title: pr.title,
+                branch: pr.head_ref_name.unwrap_or_default(),
                 url: pr.url,
                 updated_at: pr.updated_at,
             }
@@ -82,7 +89,7 @@ fn lamp_cell(n: u64, lamp: Lamp) -> Cell {
     }
 }
 
-pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>) -> Table {
+pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>, show_branch: bool) -> Table {
     let dim = Style::new().dimmed();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
@@ -106,6 +113,12 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>) -> Table 
         };
 
         let mut row = vec![mark, merge, pr, Cell::plain(r.title.clone())];
+        if show_branch {
+            row.push(Cell::styled(
+                render::truncate(&r.branch, BRANCH_WIDTH, ascii),
+                dim,
+            ));
+        }
         row.extend([
             lamp_cell(r.checks.fail, Lamp::Fail),
             lamp_cell(r.checks.running, Lamp::Running),
@@ -114,7 +127,11 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>) -> Table 
         ]);
         out.push(row);
     }
-    let header = vec!["", "", "PR", "TITLE", "FAIL", "RUN", "PASS", "THREADS"];
+    let mut header = vec!["", "", "PR", "TITLE"];
+    if show_branch {
+        header.push("BRANCH");
+    }
+    header.extend(["FAIL", "RUN", "PASS", "THREADS"]);
     Table { header, rows: out }
 }
 
@@ -136,6 +153,7 @@ mod tests {
             merge_state_status: Some(state.to_string()),
             is_draft: false,
             updated_at: None,
+            head_ref_name: Some(format!("branch-{number}")),
             merge_queue_entry: None,
             review_threads: ReviewThreads {
                 total_count: 0,
@@ -229,7 +247,7 @@ mod tests {
         let rows = build_rows(vec![p]);
         assert_eq!(rows[0].unresolved, 100);
         assert!(rows[0].unresolved_capped);
-        let table = to_table(&rows, true, &HashSet::new());
+        let table = to_table(&rows, true, &HashSet::new(), false);
         // Last column is THREADS; the `+` says "at least this many".
         assert_eq!(table.rows[0].last().unwrap().text, "100+");
     }
@@ -268,6 +286,21 @@ mod tests {
     }
 
     #[test]
+    fn branch_column_is_opt_in() {
+        let rows = build_rows(vec![pr(1, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)])]);
+        let plain = to_table(&rows, true, &HashSet::new(), false);
+        assert!(!plain.header.contains(&"BRANCH"));
+        let with_branch = to_table(&rows, true, &HashSet::new(), true);
+        assert_eq!(
+            with_branch.header,
+            [
+                "", "", "PR", "TITLE", "BRANCH", "FAIL", "RUN", "PASS", "THREADS"
+            ]
+        );
+        assert_eq!(with_branch.rows[0][4].text, "branch-1");
+    }
+
+    #[test]
     fn semaphore_shows_all_three_counts() {
         let rows = build_rows(vec![pr(
             1,
@@ -280,7 +313,7 @@ mod tests {
                 ("SUCCESS", 9),
             ],
         )]);
-        let table = to_table(&rows, true, &HashSet::new());
+        let table = to_table(&rows, true, &HashSet::new(), false);
         // ..., FAIL, RUN, PASS, THREADS
         let tail: Vec<&str> = table.rows[0][4..].iter().map(|c| c.text.as_str()).collect();
         assert_eq!(tail, ["2", "3", "9", "0"]);

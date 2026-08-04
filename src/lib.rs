@@ -391,7 +391,7 @@ fn render_mine(
         .prs
         .as_ref()
         .filter(|r| !r.is_empty())
-        .map(|rows| prs::to_table(rows, ascii, &changes.status_changed));
+        .map(|rows| prs::to_table(rows, ascii, &changes.status_changed, cli.branch));
     let mut queue_table = s
         .queue
         .as_ref()
@@ -1110,6 +1110,7 @@ mod tests {
             number: n,
             is_draft: false,
             title: format!("pr {n}"),
+            branch: format!("b/{n}"),
             mergeable: crate::status::Mergeable::Ready,
             status: None,
             checks: crate::status::Checks::default(),

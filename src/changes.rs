@@ -74,6 +74,7 @@ mod tests {
             number,
             is_draft: false,
             title: format!("PR {number}"),
+            branch: format!("b/{number}"),
             mergeable: crate::status::Mergeable::Ready,
             status,
             checks: crate::status::Checks::default(),

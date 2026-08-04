@@ -123,6 +123,7 @@ fn mine_parses_sorts_and_derives_mergeability_and_checks() {
         }
     );
     assert_eq!(rows[0].status, Some(Status::Conflicts));
+    assert_eq!(rows[0].branch, "goreleaser-install-script");
 
     // #5323 conflicts and has no checks at all.
     assert_eq!(rows[1].mergeable, Mergeable::Conflicts);
@@ -145,7 +146,7 @@ fn mine_parses_sorts_and_derives_mergeability_and_checks() {
 fn mine_ascii_mergeable_letters() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
     let rows = prs::build_rows(data.search.nodes);
-    let table = prs::to_table(&rows, true, &HashSet::new()); // ascii, no highlights
+    let table = prs::to_table(&rows, true, &HashSet::new(), false); // ascii, no highlights
     // Column 0 is the change marker; column 1 is the mergeability glyph.
     let st: Vec<&str> = table.rows.iter().map(|r| r[1].text.as_str()).collect();
     assert_eq!(st, vec!["!", "!", "n"]); // conflicts, conflicts, blocked
@@ -155,7 +156,7 @@ fn mine_ascii_mergeable_letters() {
 fn mine_renders_the_check_semaphore_and_thread_count() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
     let rows = prs::build_rows(data.search.nodes);
-    let table = prs::to_table(&rows, true, &HashSet::new());
+    let table = prs::to_table(&rows, true, &HashSet::new(), false);
     assert_eq!(
         table.header,
         ["", "", "PR", "TITLE", "FAIL", "RUN", "PASS", "THREADS"]
@@ -173,7 +174,7 @@ fn mine_changed_rows_get_a_marker() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
     let rows = prs::build_rows(data.search.nodes);
     let highlight = HashSet::from([5323]);
-    let table = prs::to_table(&rows, true, &highlight);
+    let table = prs::to_table(&rows, true, &highlight, false);
     let marks: Vec<&str> = table.rows.iter().map(|r| r[0].text.as_str()).collect();
     assert_eq!(marks, vec![" ", ">", " "]); // only #5323 is flagged
 }
