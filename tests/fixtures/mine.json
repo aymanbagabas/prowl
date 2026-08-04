@@ -3,197 +3,105 @@
     "search": {
       "nodes": [
         {
-          "number": 6656,
-          "title": "feat: goreleaser check --allow-deprecations",
-          "url": "https://github.com/goreleaser/goreleaser/pull/6656",
-          "state": "OPEN",
-          "mergeable": "MERGEABLE",
-          "mergeStateStatus": "BLOCKED",
-          "isDraft": false,
-          "updatedAt": "2026-06-12T01:39:25Z",
-          "mergeQueueEntry": null,
-          "commits": {
-            "nodes": [
-              {
-                "commit": {
-                  "checkSuites": {
-                    "totalCount": 12,
-                    "nodes": [
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": null,
-                        "checkRuns": {
-                          "totalCount": 0
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 2
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 2
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 6
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 3
-                        }
-                      }
-                    ]
-                  }
-                }
-              }
-            ]
-          }
-        },
-        {
           "number": 6475,
           "title": "feat: install scripts",
           "url": "https://github.com/goreleaser/goreleaser/pull/6475",
-          "state": "OPEN",
           "mergeable": "CONFLICTING",
           "mergeStateStatus": "DIRTY",
           "isDraft": false,
-          "updatedAt": "2026-03-22T22:50:31Z",
+          "updatedAt": "2026-08-04T01:09:18Z",
           "mergeQueueEntry": null,
+          "reviewThreads": {
+            "totalCount": 0,
+            "nodes": []
+          },
           "commits": {
             "nodes": [
               {
                 "commit": {
-                  "checkSuites": {
-                    "totalCount": 13,
-                    "nodes": [
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 1
+                  "statusCheckRollup": {
+                    "contexts": {
+                      "checkRunCountsByState": [
+                        {
+                          "state": "ACTION_REQUIRED",
+                          "count": 0
+                        },
+                        {
+                          "state": "CANCELLED",
+                          "count": 0
+                        },
+                        {
+                          "state": "COMPLETED",
+                          "count": 0
+                        },
+                        {
+                          "state": "FAILURE",
+                          "count": 4
+                        },
+                        {
+                          "state": "IN_PROGRESS",
+                          "count": 0
+                        },
+                        {
+                          "state": "NEUTRAL",
+                          "count": 1
+                        },
+                        {
+                          "state": "PENDING",
+                          "count": 0
+                        },
+                        {
+                          "state": "QUEUED",
+                          "count": 0
+                        },
+                        {
+                          "state": "SKIPPED",
+                          "count": 0
+                        },
+                        {
+                          "state": "STALE",
+                          "count": 0
+                        },
+                        {
+                          "state": "STARTUP_FAILURE",
+                          "count": 0
+                        },
+                        {
+                          "state": "SUCCESS",
+                          "count": 16
+                        },
+                        {
+                          "state": "TIMED_OUT",
+                          "count": 0
+                        },
+                        {
+                          "state": "WAITING",
+                          "count": 0
                         }
-                      },
-                      {
-                        "conclusion": null,
-                        "checkRuns": {
-                          "totalCount": 0
+                      ],
+                      "statusContextCountsByState": [
+                        {
+                          "state": "EXPECTED",
+                          "count": 0
+                        },
+                        {
+                          "state": "ERROR",
+                          "count": 0
+                        },
+                        {
+                          "state": "FAILURE",
+                          "count": 0
+                        },
+                        {
+                          "state": "PENDING",
+                          "count": 0
+                        },
+                        {
+                          "state": "SUCCESS",
+                          "count": 0
                         }
-                      },
-                      {
-                        "conclusion": "FAILURE",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": "FAILURE",
-                        "checkRuns": {
-                          "totalCount": 2
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 2
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": "FAILURE",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 1
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 6
-                        }
-                      },
-                      {
-                        "conclusion": "SUCCESS",
-                        "checkRuns": {
-                          "totalCount": 3
-                        }
-                      }
-                    ]
+                      ]
+                    }
                   }
                 }
               }
@@ -204,19 +112,125 @@
           "number": 5323,
           "title": "feat: make `.Artifacts` Os/Arch/etc template name be the same as in other places",
           "url": "https://github.com/goreleaser/goreleaser/pull/5323",
-          "state": "OPEN",
           "mergeable": "CONFLICTING",
           "mergeStateStatus": "DIRTY",
           "isDraft": false,
-          "updatedAt": "2025-05-21T04:22:19Z",
+          "updatedAt": "2026-08-04T01:05:55Z",
           "mergeQueueEntry": null,
+          "reviewThreads": {
+            "totalCount": 0,
+            "nodes": []
+          },
           "commits": {
             "nodes": [
               {
                 "commit": {
-                  "checkSuites": {
-                    "totalCount": 0,
-                    "nodes": []
+                  "statusCheckRollup": null
+                }
+              }
+            ]
+          }
+        },
+        {
+          "number": 6656,
+          "title": "feat: goreleaser check --allow-deprecations",
+          "url": "https://github.com/goreleaser/goreleaser/pull/6656",
+          "mergeable": "MERGEABLE",
+          "mergeStateStatus": "BLOCKED",
+          "isDraft": false,
+          "updatedAt": "2026-08-04T01:05:28Z",
+          "mergeQueueEntry": null,
+          "reviewThreads": {
+            "totalCount": 0,
+            "nodes": []
+          },
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "statusCheckRollup": {
+                    "contexts": {
+                      "checkRunCountsByState": [
+                        {
+                          "state": "ACTION_REQUIRED",
+                          "count": 0
+                        },
+                        {
+                          "state": "CANCELLED",
+                          "count": 0
+                        },
+                        {
+                          "state": "COMPLETED",
+                          "count": 0
+                        },
+                        {
+                          "state": "FAILURE",
+                          "count": 0
+                        },
+                        {
+                          "state": "IN_PROGRESS",
+                          "count": 0
+                        },
+                        {
+                          "state": "NEUTRAL",
+                          "count": 1
+                        },
+                        {
+                          "state": "PENDING",
+                          "count": 0
+                        },
+                        {
+                          "state": "QUEUED",
+                          "count": 0
+                        },
+                        {
+                          "state": "SKIPPED",
+                          "count": 0
+                        },
+                        {
+                          "state": "STALE",
+                          "count": 0
+                        },
+                        {
+                          "state": "STARTUP_FAILURE",
+                          "count": 0
+                        },
+                        {
+                          "state": "SUCCESS",
+                          "count": 19
+                        },
+                        {
+                          "state": "TIMED_OUT",
+                          "count": 0
+                        },
+                        {
+                          "state": "WAITING",
+                          "count": 0
+                        }
+                      ],
+                      "statusContextCountsByState": [
+                        {
+                          "state": "EXPECTED",
+                          "count": 0
+                        },
+                        {
+                          "state": "ERROR",
+                          "count": 0
+                        },
+                        {
+                          "state": "FAILURE",
+                          "count": 0
+                        },
+                        {
+                          "state": "PENDING",
+                          "count": 0
+                        },
+                        {
+                          "state": "SUCCESS",
+                          "count": 0
+                        }
+                      ]
+                    }
                   }
                 }
               }

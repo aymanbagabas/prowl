@@ -67,12 +67,16 @@ everything else is testable modules:
   the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
   two aliased searches, `requested:` + `reviewed:`) and `fetch_reviewed_merged`
   (reuses `merged_query`, now carrying `author`).
-- `status.rs` — **the** palette: `Status`, `status_style`, glyphs/ASCII,
-  `derive_status` (precedence), `fail_count`; the `mergeStateStatus` helpers
-  `state_style`, `state_label` (DIRTY → CONFLICTS), `state_glyph`,
-  `state_meaning`; and the Reviews-view `ReviewState` (Awaiting/ReReview/Updated/
-  Reviewed) with `review_style`/`review_glyph`/`review_ascii`/`review_meaning`
-  and `REVIEW_ORDER`.
+- `status.rs` — **the** palette: `Mergeable` (Ready/Blocked/Conflicts/Unknown)
+  with `mergeable_of` (collapses `mergeStateStatus` + `mergeable`),
+  `mergeable_style`/`mergeable_glyph`/`mergeable_ascii`/`mergeable_meaning` and
+  `MERGEABLE_ORDER`; the check semaphore — `Lamp` (Fail/Running/Pass),
+  `lamp_color`, `Checks` (fail/running/pass counts) and the state→lamp maps
+  `check_run_lamp` / `status_context_lamp`; `Status` + `derive_status`, which is
+  now only the bell's coarse change key (nothing renders it); and the
+  Reviews-view `ReviewState` (Awaiting/ReReview/Updated/Reviewed) with
+  `review_style`/`review_glyph`/`review_ascii`/`review_meaning` and
+  `REVIEW_ORDER`.
 - `render.rs` — `Cell`/`Table`, width-aware padding (`unicode-width`), OSC-8
   (incl. `link_styled` for clickable PR numbers), `truncate` + `fit_titles`
   (cap/align the shared `TITLE` column so every table lines up and the whole
@@ -83,9 +87,9 @@ everything else is testable modules:
   key-hint footer (`footer`, carrying the refresh
   interval and `enter open` / `/ search` hints), the `search_prompt` line (the
   `/` query with a block cursor + match count), help
-  legend (`help(view, …)` — a movement-keys line then, contextual: status glyphs
-  + every `STATE` value for
-  Mine, review glyphs for Reviews; last at the very bottom),
+  legend (`help(view, …)` — a movement-keys line then, contextual: the
+  mergeability glyphs + the FAIL/RUN/PASS/THREADS column meanings for Mine,
+  review glyphs for Reviews; last at the very bottom),
   loading screen, bell, clear. It also owns the watch-mode screen: the
   `ENTER_SCREEN` / `LEAVE_SCREEN` sequences (alternate screen + autowrap off +
   cursor hidden, and their exact reverse), and `frame(body, bottom, rows,
@@ -98,7 +102,11 @@ everything else is testable modules:
   tail and the last has no trailing newline, so painting a frame at `HOME` never
   scrolls the screen — no clear, no flicker.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
-  Each row's PR number is the OSC-8 link (no separate URL column); the queue
+  Each row's PR number is the OSC-8 link (no separate URL column). The open-PRs
+  columns are `[mark] [M] PR TITLE FAIL RUN PASS THREADS`: `M` is the
+  single mergeability glyph, `FAIL`/`RUN`/`PASS` are the check-run semaphore
+  (always all three, dim when zero, colored when not) and `THREADS` the
+  unresolved review threads (`100+` when the page was capped). The queue
   columns are `# PR TITLE AUTHOR WAIT BUILD` (author truncated to
   `AUTHOR_WIDTH`), where `WAIT` is how long the entry has been queued (now −
   `enqueuedAt`) and `BUILD` is how long its speculative merge commit has been
@@ -162,10 +170,16 @@ everything else is testable modules:
 
 ## Key behaviors
 
-- **Status precedence:** `merged > conflicts > fail > pending > pass > none`.
-  Check suites with **zero check runs** (`checkRuns.totalCount == 0`) are
-  phantom and ignored for both the glyph and the `FAIL` count, matching GitHub's
-  rollup (so a `CLEAN` PR stays green).
+- **Mergeability glyph:** `mergeStateStatus` collapses to one answer — `CLEAN`/
+  `HAS_HOOKS` → Ready, `BLOCKED`/`BEHIND`/`UNSTABLE`/`DRAFT` → Blocked, `DIRTY`
+  → Conflicts, anything else → Unknown; a `mergeable: CONFLICTING` wins outright
+  (the two fields are computed by the same job and one can land first).
+- **Check counts** come from the rollup's `checkRunCountsByState` /
+  `statusContextCountsByState` aggregates, so they're exact and unpaginated —
+  no phantom zero-run check suites and no truncated page to compensate for.
+  `STALE` lights no lamp (it neither blocks nor runs).
+- **Status precedence** (the bell key only): `conflicts > fail > running > pass
+  > none`.
 - **Sorting:** open PRs by `updatedAt` desc, merged PRs by `mergedAt` desc;
   queue by `position` asc. Reviews by review-state rank (Awaiting → ReReview →
   Updated → Reviewed) then `updatedAt` desc; reviewed-and-merged by `mergedAt` desc.
@@ -219,8 +233,8 @@ everything else is testable modules:
   dashboard nor
   spill into the shell; signal keys (Ctrl-C/Ctrl-Z) still fire. `r`/`R` forces a
   refresh now; `Tab` switches view; `?` toggles the help legend
-  (contextual to the active view — status glyphs + `STATE` values for Mine,
-  review glyphs for Reviews — hidden by default, rendered last at the very
+  (contextual to the active view — mergeability glyphs + the check/thread column
+  meanings for Mine, review glyphs for Reviews — hidden by default, rendered last at the very
   bottom; `--no-help` only affects one-shot/piped output). The movement keys
   (`j`/`k`, arrows, `g`/`G`, `Ctrl-D`/`Ctrl-U`) drive the selection cursor,
   Enter opens it, and `/` filters (Esc clears). The bottom block — search
@@ -252,8 +266,11 @@ everything else is testable modules:
   check-run `startedAt` timestamps (BUILD = now − the earliest), plus the
   queue-level `nextEntryEstimatedTimeToMerge` (the header ETA).
 - Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
-  `mergeStateStatus`, `mergeQueueEntry`, last commit `checkSuites { conclusion
-  checkRuns { totalCount } }`, `updatedAt`.
+  `mergeStateStatus`, `mergeQueueEntry`, `updatedAt`,
+  `reviewThreads(first: 100) { totalCount nodes { isResolved } }` (no unresolved
+  aggregate exists, hence the page + a `+` when capped), and the last commit's
+  `statusCheckRollup { contexts(first: 1) { checkRunCountsByState
+  statusContextCountsByState } }` — the aggregates only, no context nodes.
 - Merged: `search(is:pr is:merged author:<me> merged:>=<since>)` with `mergedAt`
   (fetched `sort:updated-desc`, since search can't sort by merge time, then
   re-sorted by `mergedAt` for display). Now also fetches `author` (used by the

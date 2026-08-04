@@ -299,9 +299,9 @@ pub fn select_marker(ascii: bool) -> Cell {
 
 /// The help legend for `view`: only the glyphs and values that view actually
 /// uses, so a glyph the other view reuses for something else can't muddy it. The
-/// Mine view lists the status glyphs + every `mergeStateStatus` value; the
-/// Reviews view lists the review-state glyphs. The title reuses the
-/// section-header style; meanings are dim.
+/// Mine view lists the mergeability glyphs plus the check-semaphore / review
+/// thread columns; the Reviews view lists the review-state glyphs. The title
+/// reuses the section-header style; meanings are dim.
 pub fn help(view: View, ascii: bool, styled: bool) -> String {
     let dim = Style::new().dimmed();
     let mut out = String::new();
@@ -339,50 +339,36 @@ pub fn help(view: View, ascii: bool, styled: bool) -> String {
 
     match view {
         View::Mine => {
-            for s in status::ORDER {
+            for m in status::MERGEABLE_ORDER {
                 line(
                     &mut out,
-                    status::glyph(s, ascii),
-                    status::status_style(s).1,
-                    status::status_meaning(s),
+                    status::mergeable_glyph(m, ascii),
+                    status::mergeable_style(m).1,
+                    status::mergeable_meaning(m),
                 );
             }
-            let _ = writeln!(out, "  {}", empty_line("- no checks reported yet", styled));
-
-            for st in status::STATE_ORDER {
-                let meaning = status::state_meaning(st);
-                let c = status::state_style(st);
-                if ascii {
-                    // Label form (matches the ASCII/piped STATE column).
-                    let label = status::state_label(st);
-                    let tail = if meaning.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" \u{2014} {meaning}")
-                    };
-                    if styled {
-                        let _ = writeln!(
-                            out,
-                            "  {}{label}{}{}{tail}{}",
-                            c.render(),
-                            c.render_reset(),
-                            dim.render(),
-                            dim.render_reset()
-                        );
-                    } else {
-                        let _ = writeln!(out, "  {label}{tail}");
-                    }
-                } else {
-                    // Glyph form (matches the Nerd Font STATE column); always styled.
-                    let g = status::state_glyph(st);
+            // The detail columns: what a blocked PR is waiting on.
+            let cols = [
+                ("FAIL", status::RED, "check runs that failed"),
+                ("RUN", status::YELLOW, "check runs still going"),
+                ("PASS", status::GREEN, "check runs that passed"),
+                ("THREADS", status::PEACH, "unresolved review threads"),
+            ];
+            let width = cols.iter().map(|(l, ..)| l.len()).max().unwrap_or(0);
+            for (label, color, meaning) in cols {
+                let c = status::fg(color);
+                let pad = " ".repeat(width - label.len());
+                if styled {
                     let _ = writeln!(
                         out,
-                        "  {}{g}{}  {}{meaning}{}",
+                        "  {}{label}{}{pad}  {}{meaning}{}",
                         c.render(),
                         c.render_reset(),
                         dim.render(),
                         dim.render_reset()
                     );
+                } else {
+                    let _ = writeln!(out, "  {label}{pad}  {meaning}");
                 }
             }
         }
@@ -698,7 +684,7 @@ mod tests {
     fn padding_uses_display_width_for_glyphs() {
         // The check-circle glyph is one display column but several bytes; the
         // following column must still line up by display width.
-        let glyph = status::status_style(status::Status::Pass).0;
+        let glyph = status::mergeable_style(status::Mergeable::Ready).0;
         let table = Table {
             header: vec!["ST", "PR"],
             rows: vec![
