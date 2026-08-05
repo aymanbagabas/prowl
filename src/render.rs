@@ -289,6 +289,17 @@ pub fn empty_line(msg: &str, styled: bool) -> String {
     }
 }
 
+/// Where a table row's PR column starts: the (blank) marker cell and the
+/// per-row glyph cell, each one column wide, plus their two-space separators.
+/// Empty-section placeholders are indented by it so they read as a row.
+pub const ROW_INDENT: usize = 6;
+
+/// A dim placeholder standing in for an empty section's rows, indented by
+/// `indent` columns so it lines up with the rows it stands in for.
+pub fn placeholder(msg: &str, indent: usize, styled: bool) -> String {
+    format!("{}{}", " ".repeat(indent), empty_line(msg, styled))
+}
+
 /// A leading cell marking a row that changed since the previous refresh.
 pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     if highlighted {

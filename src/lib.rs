@@ -182,7 +182,7 @@ fn section(
     if let Some(table) = table {
         f.push_str(&render::render_table(table, styled));
     } else {
-        f.push_str(&render::empty_line(empty_msg, styled));
+        f.push_str(&render::placeholder(empty_msg, render::ROW_INDENT, styled));
         f.push('\n');
     }
     f.push('\n');
@@ -621,7 +621,9 @@ fn render_commits(
     styled: bool,
 ) {
     if !stats.available {
-        f.push_str(&render::empty_line("Commit stats unavailable.", styled));
+        // The shipments rows lead with a 2-column gutter, not a table's marker
+        // and glyph cells, so the placeholder follows that instead.
+        f.push_str(&render::placeholder("Commit stats unavailable.", 2, styled));
         f.push('\n');
         return;
     }
@@ -1061,6 +1063,15 @@ mod tests {
         after("My open PRs (0)", "No open PRs.");
         after("Merge Queue (0)", "No merge queue.");
         after("My merged PRs (0)", "No recent merged PRs.");
+
+        // ...indented to the row gutter, so it lines up with a section's rows.
+        for msg in ["No open PRs.", "No merge queue.", "No recent merged PRs."] {
+            let line = body
+                .lines()
+                .find(|l| l.contains(msg))
+                .expect("placeholder line");
+            assert_eq!(line, format!("{}{msg}", " ".repeat(render::ROW_INDENT)));
+        }
     }
 
     #[test]

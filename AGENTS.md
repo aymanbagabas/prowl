@@ -90,7 +90,10 @@ everything else is testable modules:
   legend (`help(view, …)` — a movement-keys line then, contextual: the
   mergeability glyphs for Mine, review glyphs for Reviews; the column headers
   speak for themselves and are not repeated; last at the very bottom),
-  loading screen, bell, clear. It also owns the watch-mode screen: the
+  loading screen, bell, clear, and the dim one-liners: `empty_line` (the error
+  line, the loading screen) and `placeholder` (an empty section's stand-in row,
+  indented — `ROW_INDENT` — so it lines up with the rows it replaces). It also
+  owns the watch-mode screen: the
   `ENTER_SCREEN` / `LEAVE_SCREEN` sequences (alternate screen + autowrap off +
   cursor hidden, and their exact reverse), and `frame(body, bottom, rows,
   caret)`, which composes one screen of exactly `rows` lines — as much of the
