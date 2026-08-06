@@ -69,8 +69,8 @@ While watching, press `r` to refresh now, `Tab` to switch between your PRs and
 your reviews, `?` to toggle the help legend, and `Ctrl-C` to quit. The dashboard
 takes over the alternate screen, so quitting hands your shell back exactly as
 you left it. A footer glued to the bottom of the screen (`r refresh (every 5m) -
-tab switch view - enter open - / search - ? help`) shows the keys and the refresh
-interval. While a refresh is in flight the
+tab switch view - enter open - y copy - / search - ? help`) shows the keys and
+the refresh interval. While a refresh is in flight the
 hint reads `r refreshing` and `r` presses are ignored until it finishes.
 The legend is contextual to the active view: mergeability glyphs and the check /
 thread columns for your PRs, review glyphs for your reviews.
@@ -79,6 +79,20 @@ Move the selection cursor through the listed PRs and releases with `j`/`k` (or
 `↓`/`↑`), `g`/`G` for the first/last row, and `Ctrl-D`/`Ctrl-U` to jump half a
 page; press `Enter` to open the highlighted PR (or release) in your browser. The
 cursor only appears once you start moving it.
+
+Press `y` to copy the selected row's link, or `Y` to copy every link in the
+section the cursor is in — your open PRs, the merge queue, the merged list, your
+shipments, either reviews list — as a markdown list:
+
+```markdown
+- https://github.com/owner/name/pull/1
+- https://github.com/owner/name/pull/2
+```
+
+With no cursor yet, `Y` copies the first non-empty section; with a filter
+applied, it copies only the matching rows. Copying uses the OSC 52 escape, so it
+sets the clipboard of the terminal you're looking at even over SSH — as long as
+that terminal supports it (in tmux, `set -g set-clipboard on`).
 
 Press `/` to search: type to filter the rows live by number, title, author, or
 release tag; `Enter` applies the filter and drops you back to the list (so the

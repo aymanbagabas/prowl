@@ -16,9 +16,9 @@ output with `--view`):
   per-row review-state glyph) **→ Reviewed & merged** (merged PRs I reviewed).
 
 Below the active view is a `r refresh (every 5m) - tab switch view - enter open -
-/ search - ? help` footer (which also shows the refresh interval, and reads `r
-refreshing` while a fetch is in flight), an optional search prompt, and an
-optional help legend last
+y copy - / search - ? help` footer (which also shows the refresh interval, and
+reads `r refreshing` while a fetch is in flight), an optional search prompt, and
+an optional help legend last
 at the bottom. While watching, the very top shows a `my PRs / reviews` tab strip
 with the active view accented. It rings the terminal bell when one of your PRs
 merges or an open PR's status changes, and flags the changed rows (the bell and
@@ -146,10 +146,13 @@ everything else is testable modules:
   merge-commit convention) that annotates the merged section's `RELEASE` column.
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
-- `nav.rs` — watch-mode row navigation + search: `targets(view, &Sections,
-  query)` is the open URL of every navigable row matching `query` in render
-  order (PR rows → the PR; shipments → the release / compare log; url-less rows
-  skipped), `filter(&Sections, query)` clones the matching rows for rendering
+- `nav.rs` — watch-mode row navigation + search: `groups(view, &Sections, query)`
+  is the matching rows' open URLs bucketed by rendered section, `targets` is that
+  flattened (PR rows → the PR; shipments → the release / compare log; url-less
+  rows skipped) so a selection index lines up with the rendered rows,
+  `section_at(…, index)` is the one group holding `index` (what `Y` copies; an
+  empty section holds no index, so index 0 means the first non-empty one),
+  `filter(&Sections, query)` clones the matching rows for rendering
   (same per-row haystack — number/title/author/tag — so rows and targets stay in
   lockstep), `moved` advances the selection cursor (lazy: `None` until first
   move, `Bottom` enters at the last row), and `clamp` keeps it in range after a
@@ -157,12 +160,19 @@ everything else is testable modules:
 - `open.rs` — `open::url` opens a URL in the default browser via the platform
   opener (`open` / `xdg-open` / `cmd /C start`), spawned detached; rejects
   non-`http(s)` URLs; no new dep.
+- `clipboard.rs` — `clipboard::copy` sets the clipboard with the OSC 52 escape
+  (`ESC ] 52 ; c ; <base64> BEL`) written straight to stdout, plus the ~15-line
+  base64 encoder it needs. No dep, no subprocess, and it reaches the clipboard of
+  the terminal you're *looking at*, so it works over SSH; the terminal has to
+  support it (tmux needs `set -g set-clipboard on`) and silently ignores it
+  otherwise, hence the "copied N links" wording.
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
 - `term.rs` — Unix terminal helper: while watching, quiet stdin (drop echo +
   line buffering, keep `ISIG` so signal keys work) and turn the interval wait
   into a poll. `wait` returns a semantic `Wait` for each normal-mode key — `r`
-  refresh, `Tab` switch view, `?` help, `/` search, Enter open, lone Esc
+  refresh, `Tab` switch view, `?` help, `/` search, Enter open, `y`/`Y` copy
+  row/section, lone Esc
   cancel(-filter), and the movement keys (`j`/`k`, arrows, `g`/`G`,
   `Ctrl-D`/`Ctrl-U`); `read_search` returns raw `SearchKey`s (char/backspace/
   enter/esc) for the search prompt (no key-repeat collapse, so live filtering
@@ -223,6 +233,13 @@ everything else is testable modules:
   `open::url`. Every row across all sections of the active view is one target
   (`nav::targets`, in render order); switching views drops the cursor and a
   refresh `clamp`s it. `--once`/piped output has no selection.
+- **Copy:** `y` copies the selected row's link, `Y` every link of the section the
+  cursor is in (`nav::section_at`) as a markdown list (`- <url>` per line, no
+  trailing newline). Both honor the active search filter, so `Y` copies only the
+  visible matches; with no cursor yet `Y` takes the first non-empty section. The
+  outcome ("copied N links", or a `copy failed:` error) lands on the same dim
+  trailing line as a refresh error and is cleared by the next refresh. Watch mode
+  only — `--once`/piped output has no keys.
 - **Search / filter:** `/` opens a search prompt (`Ui.searching`); typing filters
   the rows live (case-insensitive substring over number/title/author/release
   tag), Enter applies the filter and returns to the list, Esc (or a lone Esc from
@@ -245,16 +262,19 @@ everything else is testable modules:
   (contextual to the active view — mergeability glyphs for Mine, review glyphs
   for Reviews — hidden by default, rendered last at the very bottom; `--no-help` only affects one-shot/piped output). The movement keys
   (`j`/`k`, arrows, `g`/`G`, `Ctrl-D`/`Ctrl-U`) drive the selection cursor,
-  Enter opens it, and `/` filters (Esc clears). The bottom block — search
+  Enter opens it, `y`/`Y` copy it (row / whole section), and `/` filters (Esc
+  clears). The bottom block — search
   prompt, error line, footer, help legend — is glued to the last rows of the
   screen (`render::frame`), and the sections scroll under it, following the
   selection. The only persistent
   bottom line is the footer
-  (`r refresh (every 5m) - tab switch view - enter open - / search - ? help`),
+  (`r refresh (every 5m) - tab switch view - enter open - y copy - / search - ?
+  help`),
   which carries
   the
   refresh
-  interval; a failed refresh adds a dim `error: …` line above it. While a fetch
+  interval; a failed refresh adds a dim `error: …` line above it (the same slot
+  a copy's `copied N links` confirmation uses). While a fetch
   is in flight the footer reads `r refreshing` with the `r` glyph dimmed and `r`
   presses discarded (navigation, search, Tab and `?` stay live); it reverts to
   `r refresh (every 5m)` once the fetch finishes. The blocking

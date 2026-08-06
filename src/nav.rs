@@ -79,42 +79,84 @@ fn push_matches<'a, T: Searchable>(urls: &mut Vec<&'a str>, rows: Option<&'a [T]
     }
 }
 
+/// The URLs of the rows in `rows` (if present) matching the already-lowercased
+/// `query` — one rendered section's worth of navigable targets.
+fn group<'a, T: Searchable>(rows: Option<&'a [T]>, query: &str) -> Vec<&'a str> {
+    let mut urls = Vec::new();
+    push_matches(&mut urls, rows, query);
+    urls
+}
+
+/// The "My Shipments" section's targets: the "upcoming" compare log (when there
+/// is one) then each release page, matched against the already-lowercased
+/// `query`. Empty when the release lookup failed (`available` is false).
+fn shipments<'a>(s: &'a Sections, query: &str) -> Vec<&'a str> {
+    let mut urls = Vec::new();
+    if let Some(stats) = &s.commits
+        && stats.available
+    {
+        if let Some(b) = &stats.upcoming
+            && hit("upcoming", query)
+        {
+            urls.push(b.url.as_str());
+        }
+        urls.extend(
+            stats
+                .releases
+                .iter()
+                .filter(|r| hit(&r.tag, query))
+                .map(|r| r.bucket.url.as_str()),
+        );
+    }
+    urls
+}
+
+/// The navigable targets of `view` matching `query`, grouped by rendered
+/// section and in render order. `targets` is this flattened, so the two can't
+/// drift; `section_at` uses the grouping to answer "every link in the section
+/// the cursor is in".
+fn groups<'a>(view: View, s: &'a Sections, query: &str) -> Vec<Vec<&'a str>> {
+    let q = query.to_lowercase();
+    match view {
+        View::Mine => vec![
+            group(s.prs.as_deref(), &q),
+            group(s.queue.as_deref(), &q),
+            group(s.merged.as_deref(), &q),
+            shipments(s, &q),
+        ],
+        View::Reviews => vec![
+            group(s.reviews.as_deref(), &q),
+            group(s.reviewed_merged.as_deref(), &q),
+        ],
+    }
+}
+
 /// The open URL of every navigable row in `view` that matches `query`, in the
 /// exact top-to-bottom order the dashboard renders them, so a selection index
 /// lines up with the rendered (and identically filtered) rows. Rows without a
 /// URL (an "upcoming" shipments row with no commits) are skipped. An empty
 /// `query` yields every row.
 pub(crate) fn targets<'a>(view: View, s: &'a Sections, query: &str) -> Vec<&'a str> {
-    let q = query.to_lowercase();
-    let mut urls: Vec<&str> = Vec::new();
-    match view {
-        View::Mine => {
-            push_matches(&mut urls, s.prs.as_deref(), &q);
-            push_matches(&mut urls, s.queue.as_deref(), &q);
-            push_matches(&mut urls, s.merged.as_deref(), &q);
-            if let Some(stats) = &s.commits
-                && stats.available
-            {
-                if let Some(b) = &stats.upcoming
-                    && hit("upcoming", &q)
-                {
-                    urls.push(b.url.as_str());
-                }
-                urls.extend(
-                    stats
-                        .releases
-                        .iter()
-                        .filter(|r| hit(&r.tag, &q))
-                        .map(|r| r.bucket.url.as_str()),
-                );
-            }
+    groups(view, s, query).concat()
+}
+
+/// Every target of the section containing the `index`-th target — what `Y`
+/// copies. Empty sections hold no index, so passing 0 with no selection yields
+/// the first non-empty section; an out-of-range index yields nothing.
+pub(crate) fn section_at<'a>(
+    view: View,
+    s: &'a Sections,
+    query: &str,
+    index: usize,
+) -> Vec<&'a str> {
+    let mut start = 0;
+    for g in groups(view, s, query) {
+        if index < start + g.len() {
+            return g;
         }
-        View::Reviews => {
-            push_matches(&mut urls, s.reviews.as_deref(), &q);
-            push_matches(&mut urls, s.reviewed_merged.as_deref(), &q);
-        }
+        start += g.len();
     }
-    urls
+    Vec::new()
 }
 
 /// A copy of `s` keeping only the rows that match `query` (every section, both
@@ -363,6 +405,72 @@ mod tests {
         assert!(f.merged.as_ref().unwrap().is_empty());
         // The filtered sections' targets equal the query-filtered targets.
         assert_eq!(targets(View::Mine, &f, ""), targets(View::Mine, &s, "#2"));
+    }
+
+    #[test]
+    fn section_at_returns_the_whole_section_under_the_cursor() {
+        let mut s = empty();
+        s.prs = Some(vec![pr(1), pr(2)]);
+        s.queue = Some(vec![queued(3)]);
+        s.merged = Some(vec![merged(4), merged(5)]);
+        s.commits = Some(CommitStats {
+            available: true,
+            upcoming: Some(bucket("https://up")),
+            releases: vec![Release {
+                tag: "v1".into(),
+                bucket: bucket("https://rel/v1"),
+                published_at: None,
+            }],
+        });
+        // Indices 0-1 are the open PRs, 2 the queue, 3-4 merged, 5-6 shipments.
+        let at = |i| section_at(View::Mine, &s, "", i);
+        assert_eq!(at(0), vec!["https://pr/1", "https://pr/2"]);
+        assert_eq!(at(1), vec!["https://pr/1", "https://pr/2"]);
+        assert_eq!(at(2), vec!["https://q/3"]);
+        assert_eq!(at(4), vec!["https://m/4", "https://m/5"]);
+        assert_eq!(at(6), vec!["https://up", "https://rel/v1"]);
+        // Past the end there's no section.
+        assert!(at(7).is_empty());
+    }
+
+    #[test]
+    fn section_at_skips_empty_sections_and_honors_the_filter() {
+        let mut s = empty();
+        // No open PRs: index 0 must land on the first *non-empty* section, so a
+        // `Y` with no selection copies the queue rather than nothing.
+        s.prs = Some(vec![]);
+        s.queue = Some(vec![queued(3)]);
+        s.merged = Some(vec![merged(4)]);
+        assert_eq!(section_at(View::Mine, &s, "", 0), vec!["https://q/3"]);
+
+        // The filter applies to the section's contents too: only matching rows.
+        let mut s = empty();
+        s.prs = Some(vec![pr(1), pr(2)]);
+        assert_eq!(section_at(View::Mine, &s, "#2", 0), vec!["https://pr/2"]);
+        assert!(section_at(View::Mine, &s, "zzz", 0).is_empty());
+    }
+
+    #[test]
+    fn section_at_groups_the_reviews_view() {
+        let mut s = empty();
+        s.reviews = Some(vec![ReviewRow {
+            number: 1,
+            is_draft: false,
+            title: "r".into(),
+            author: "a".into(),
+            url: "https://rev/1".into(),
+            state: ReviewState::Awaiting,
+            updated_at: None,
+        }]);
+        s.reviewed_merged = Some(vec![ReviewedMergedRow {
+            number: 2,
+            title: "rm".into(),
+            author: "a".into(),
+            url: "https://revm/2".into(),
+            merged_at: None,
+        }]);
+        assert_eq!(section_at(View::Reviews, &s, "", 0), vec!["https://rev/1"]);
+        assert_eq!(section_at(View::Reviews, &s, "", 1), vec!["https://revm/2"]);
     }
 
     #[test]

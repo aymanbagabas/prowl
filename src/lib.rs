@@ -29,6 +29,7 @@ pub mod auth;
 pub mod cache;
 pub mod changes;
 pub mod cli;
+pub mod clipboard;
 pub mod commits;
 pub mod github;
 pub mod merged;
@@ -294,6 +295,8 @@ impl Ui {
                     Act::Idle
                 }
             }
+            term::Wait::Copy => self.copy_selected(last_good, styled),
+            term::Wait::CopySection => self.copy_section(last_good, styled),
             _ => {
                 let len = last_good.map_or(0, |s| nav::targets(self.view, s, &self.search).len());
                 let half = term::height().map_or(10, |h| usize::from(h / 2).max(1));
@@ -337,18 +340,20 @@ impl Ui {
         }
     }
 
+    /// The URL under the selection cursor: `None` without a selection, without
+    /// data, or if the cursor has fallen off the (filtered) list.
+    fn selected_url<'a>(&self, last_good: Option<&'a Sections>) -> Option<&'a str> {
+        let sel = self.selected?;
+        nav::targets(self.view, last_good?, &self.search)
+            .get(sel)
+            .copied()
+    }
+
     /// Open the selected row's URL in the browser. Returns whether the frame
     /// should be repainted — only when opening failed (a dim error line is set);
     /// a no-op (no selection / no data / success) leaves the screen as is.
     fn open_selected(&mut self, last_good: Option<&Sections>, styled: bool) -> bool {
-        let Some(sel) = self.selected else {
-            return false;
-        };
-        let Some(good) = last_good else { return false };
-        let Some(url) = nav::targets(self.view, good, &self.search)
-            .get(sel)
-            .copied()
-        else {
+        let Some(url) = self.selected_url(last_good) else {
             return false;
         };
         if let Err(e) = open::url(url) {
@@ -356,6 +361,49 @@ impl Ui {
             return true;
         }
         false
+    }
+
+    /// `y`: copy the selected row's link. A no-op without a selection or data.
+    fn copy_selected(&mut self, last_good: Option<&Sections>, styled: bool) -> Act {
+        match self.selected_url(last_good) {
+            Some(url) => self.copy(url, 1, styled),
+            None => Act::Idle,
+        }
+    }
+
+    /// `Y`: copy every link of the section the cursor is in, as a markdown list.
+    /// With no selection that's the first non-empty section, matching where a
+    /// movement key would enter. Honors the active search filter, like `targets`.
+    fn copy_section(&mut self, last_good: Option<&Sections>, styled: bool) -> Act {
+        let Some(good) = last_good else {
+            return Act::Idle;
+        };
+        let urls = nav::section_at(
+            self.view,
+            good,
+            &self.search,
+            self.selected.unwrap_or_default(),
+        );
+        if urls.is_empty() {
+            return Act::Idle;
+        }
+        let list = urls
+            .iter()
+            .map(|u| format!("- {u}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.copy(&list, urls.len(), styled)
+    }
+
+    /// Hand `text` (`n` links) to the terminal's clipboard and report it on the
+    /// trailing status line, which the next refresh clears.
+    fn copy(&mut self, text: &str, n: usize, styled: bool) -> Act {
+        let plural = if n == 1 { "" } else { "s" };
+        self.last_status = match clipboard::copy(text) {
+            Ok(()) => note_trailing(&format!("copied {n} link{plural}"), styled),
+            Err(e) => error_trailing(&format!("copy failed: {e}"), styled),
+        };
+        Act::Repaint
     }
 }
 
@@ -722,6 +770,14 @@ fn render_commits(
 /// A dim trailing line reporting a transient error (last good data is kept).
 fn error_trailing(msg: &str, styled: bool) -> String {
     let mut s = render::empty_line(&format!("error: {msg}"), styled);
+    s.push('\n');
+    s
+}
+
+/// A dim trailing line confirming a transient action (a clipboard copy), shown
+/// in the same slot as the error line and cleared by the next refresh.
+fn note_trailing(msg: &str, styled: bool) -> String {
+    let mut s = render::empty_line(msg, styled);
     s.push('\n');
     s
 }

@@ -28,6 +28,10 @@ pub enum Wait {
     HalfDown,
     /// `Enter`: open the selected row in the browser.
     Open,
+    /// `y`: copy the selected row's link to the clipboard.
+    Copy,
+    /// `Y`: copy every link in the selected row's section to the clipboard.
+    CopySection,
     /// `/`: open the search prompt to filter rows.
     Search,
     /// A lone `Esc`: clear an applied search filter.
@@ -284,10 +288,10 @@ mod imp {
 
     /// Wait up to `deadline` for the next scheduled refresh, returning early on
     /// a recognized keypress: `r`/`R` refresh, Tab switch view, `?` help, `/`
-    /// search, Enter open, and the movement keys (`j`/`k`/`g`/`G`, the arrows,
-    /// and Ctrl-D/Ctrl-U for half a page). A resize or a resume from Ctrl-Z
-    /// comes back as `Redraw`. Every other keystroke is discarded. Falls back to
-    /// a plain sleep when stdin isn't a quieted terminal.
+    /// search, Enter open, `y`/`Y` copy, and the movement keys (`j`/`k`/`g`/`G`,
+    /// the arrows, and Ctrl-D/Ctrl-U for half a page). A resize or a resume from
+    /// Ctrl-Z comes back as `Redraw`. Every other keystroke is discarded. Falls
+    /// back to a plain sleep when stdin isn't a quieted terminal.
     pub fn wait(deadline: Instant) -> Wait {
         let mut buf = [0u8; 256];
         loop {
@@ -360,6 +364,10 @@ mod imp {
             Some(Wait::ToggleHelp)
         } else if has(b'/') {
             Some(Wait::Search)
+        } else if has(b'y') {
+            Some(Wait::Copy)
+        } else if has(b'Y') {
+            Some(Wait::CopySection)
         } else if has(b'g') {
             Some(Wait::Top)
         } else if has(b'G') {
@@ -408,6 +416,8 @@ mod imp {
             assert_eq!(classify(b"\t"), Some(Wait::SwitchView));
             assert_eq!(classify(b"?"), Some(Wait::ToggleHelp));
             assert_eq!(classify(b"/"), Some(Wait::Search));
+            assert_eq!(classify(b"y"), Some(Wait::Copy));
+            assert_eq!(classify(b"Y"), Some(Wait::CopySection));
             assert_eq!(classify(b"g"), Some(Wait::Top));
             assert_eq!(classify(b"G"), Some(Wait::Bottom));
             assert_eq!(classify(b"\x04"), Some(Wait::HalfDown)); // Ctrl-D
