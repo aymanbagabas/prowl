@@ -2,7 +2,7 @@
 
 use crate::model::QueueEntryNode;
 use crate::render::{self, Cell, Table};
-use crate::status::{self, BLUE, YELLOW};
+use crate::status::{self, BLUE, Checks, Lamp, YELLOW};
 use crate::timefmt;
 use uncurses::style::Style;
 
@@ -22,6 +22,8 @@ pub struct QueueRow {
     /// When the speculative merge commit started building (BUILD = now - this);
     /// `None` when the entry isn't building yet.
     pub build_started_at: Option<String>,
+    /// Failing / running / passing checks on the speculative merge commit.
+    pub checks: Checks,
 }
 
 /// Build rows ordered by queue position ascending; `mine` flags own PRs.
@@ -30,6 +32,7 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
         .into_iter()
         .map(|n| {
             let build_started_at = n.build_started_at();
+            let checks = n.checks();
             let author = n
                 .pull_request
                 .author
@@ -43,6 +46,7 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
                 url: n.pull_request.url,
                 enqueued_at: n.enqueued_at,
                 build_started_at,
+                checks,
             }
         })
         .collect();
@@ -53,16 +57,17 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
 pub fn to_table(rows: &[QueueRow], ascii: bool) -> Table {
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        // Mine: position, PR link, author, and the wait/build ages all share
-        // one highlight style, passed by reference (`Cell` takes
-        // `impl Into<Style>`, so `&Style` converts at the boundary).
-        let (meta, pr, title) = if r.mine {
+        let (meta, pr, author_style, title) = if r.mine {
             let hi = status::fg(YELLOW).bold();
-            (hi.clone(), hi, Style::new().bold())
+            (hi.clone(), hi.clone(), hi, Style::new().bold())
         } else {
-            (Style::new().faint(), status::fg(BLUE), Style::new())
+            (
+                Style::new().faint(),
+                status::fg(BLUE),
+                Style::new(),
+                Style::new(),
+            )
         };
-        let author_style = if r.mine { &meta } else { &title };
         let author = render::truncate(&r.author, AUTHOR_WIDTH, ascii);
         let wait = timefmt::age_of(r.enqueued_at.as_deref());
         // No check has started running yet (queued, or no speculative commit).
@@ -73,17 +78,22 @@ pub fn to_table(rows: &[QueueRow], ascii: bool) -> Table {
         out.push(vec![
             Cell::plain(" "),
             Cell::styled(r.position.to_string(), &meta),
-            render::Cell::pr(r.number, r.url.clone(), pr),
+            Cell::pr(r.number, r.url.clone(), &pr),
             Cell::styled(r.title.clone(), &title),
-            Cell::styled(author, author_style),
+            Cell::styled(author, &author_style),
             Cell::styled(wait, &meta),
             Cell::styled(build, &meta),
+            render::lamp_cell(r.checks.fail, Lamp::Fail),
+            render::lamp_cell(r.checks.running, Lamp::Running),
+            render::lamp_cell(r.checks.pass, Lamp::Pass),
         ]);
     }
     Table {
         // A leading (always-blank) marker column keeps the queue aligned with
         // the Open PRs and Merged PRs tables, which lead with the change marker.
-        header: vec!["", "#", "PR", "TITLE", "AUTHOR", "WAIT", "BUILD"],
+        header: vec![
+            "", "#", "PR", "TITLE", "AUTHOR", "WAIT", "BUILD", "FAIL", "RUN", "PASS",
+        ],
         rows: out,
     }
 }
@@ -115,6 +125,8 @@ mod tests {
         QueueCommit {
             status_check_rollup: Some(QueueRollup {
                 contexts: QueueContexts {
+                    check_runs: Vec::new(),
+                    status_contexts: Vec::new(),
                     nodes: starts
                         .iter()
                         .map(|s| QueueContext {

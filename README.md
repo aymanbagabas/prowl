@@ -21,11 +21,21 @@ list includes only PRs that request you directly or also your teams'.
 It talks to the GitHub API directly. On first run it walks you through a
 one-time browser **device login** (or set `GITHUB_TOKEN`).
 
-Status is a single Catppuccin-colored glyph. On a TTY, prowl uses Nerd Font
-icons (pass, fail, pending, conflicts, merged); with `--ascii` (or when piped)
-it falls back to `P` pass, `x` fail, `.` pending, `!` conflicts, `m` merged.
-Each PR number is a clickable link to the PR. Long titles are truncated (with a
-`⋯`) and the whole view is kept within 120 columns.
+Each open PR leads with **one** Catppuccin-colored glyph answering "can I merge
+this?" — ready, blocked (reviews, required checks, behind the base, draft), or
+conflicting. Everything that could be blocking it is then broken out to the
+right: a red/yellow/green **check semaphore** (`FAIL` / `RUN` / `PASS` check-run
+counts) and the number of unresolved review **threads**. Nothing is reported
+twice.
+
+Merge-queue entries get the same semaphore for their speculative merge commit,
+next to how long they've been queued and how long that build has been running.
+
+On a TTY prowl uses Nerd Font icons; with `--ascii` (or when piped) the
+mergeability glyph falls back to `y` ready, `n` blocked, `!` conflicts, `?`
+unknown. `--branch` adds the PR's head branch as a column, and `--no-draft`
+hides drafts. Each PR number is a clickable link to the PR. Long titles are
+truncated (with a `⋯`) and the whole view is kept within 120 columns.
 
 ## Install
 
@@ -60,16 +70,30 @@ your reviews, `?` to toggle the help legend, and `q` (or `Ctrl-C`) to quit;
 `Ctrl-Z` suspends it back to your shell. The dashboard takes over the alternate
 screen, so quitting hands your shell back exactly as you left it. A footer glued
 to the bottom of the screen (`r refresh (every 5m) - tab switch view - enter open
-- / search - ? help`) shows the keys and the refresh interval. While a refresh is
-in flight the hint reads `r refreshing` and `r` presses are ignored until it
-finishes. The sections scroll under the footer, following your selection.
-The legend is contextual to the active view: status glyphs and `STATE` values
-for your PRs, review glyphs for your reviews.
+- y copy - / search - ? help`) shows the keys and the refresh interval. While a
+refresh is in flight the hint reads `r refreshing` and `r` presses are ignored
+until it finishes. The sections scroll under the footer, following your
+selection. The legend is contextual to the active view: mergeability glyphs for
+your PRs, review glyphs for your reviews.
 
 Move the selection cursor through the listed PRs and releases with `j`/`k` (or
 `↓`/`↑`), `g`/`G` for the first/last row, and `Ctrl-D`/`Ctrl-U` to jump half a
 page; press `Enter` to open the highlighted PR (or release) in your browser. The
 cursor only appears once you start moving it.
+
+Press `y` to copy the selected row's link, or `Y` to copy every link in the
+section the cursor is in — your open PRs, the merge queue, the merged list, your
+shipments, either reviews list — as a markdown list:
+
+```markdown
+- https://github.com/owner/name/pull/1
+- https://github.com/owner/name/pull/2
+```
+
+With no cursor yet, `Y` copies the first non-empty section; with a filter
+applied, it copies only the matching rows. Copying uses the OSC 52 escape, so it
+sets the clipboard of the terminal you're looking at even over SSH — as long as
+that terminal supports it (in tmux, `set -g set-clipboard on`).
 
 Press `/` to search: type to filter the rows live by number, title, author, or
 release tag; `Enter` applies the filter and drops you back to the list (so the
@@ -77,4 +101,5 @@ cursor and `Enter` work on the matches), and `Esc` clears it (with no
 filter to clear, `Esc` quits).
 
 Run `prowl --help` for all flags (interval, `--only`, `--view`,
-`--review-scope`, merged window, etc.) and the full watch-mode key list.
+`--review-scope`, `--branch`, `--no-draft`, merged window, etc.) and the full
+watch-mode key list.

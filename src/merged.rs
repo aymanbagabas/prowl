@@ -1,10 +1,10 @@
 //! Recently-merged view: rows, sorting, styling, and table building. Every row
-//! leads with the shared `merged` palette glyph (branch, mauve).
+//! in the section is merged by definition, so it carries no per-row glyph.
 
 use crate::commits::{ReleaseMap, ReleaseRef};
 use crate::model::MergedNode;
 use crate::render::{self, Cell, Table};
-use crate::status::{self, BLUE, Status};
+use crate::status::{self, BLUE};
 use crate::timefmt;
 use std::collections::HashSet;
 use uncurses::style::Style;
@@ -53,8 +53,10 @@ pub fn to_table(rows: &[MergedRow], ascii: bool, highlight: &HashSet<i64>) -> Ta
         };
         out.push(vec![
             render::change_marker(highlight.contains(&r.number), ascii),
-            render::status_cell(Status::Merged, ascii),
-            render::Cell::pr(r.number, r.url.clone(), status::fg(BLUE)),
+            // Blank spacer where the open-PRs table has its mergeability glyph,
+            // so both tables' PR/TITLE columns start at the same screen column.
+            Cell::plain(" "),
+            Cell::pr(r.number, r.url.clone(), status::fg(BLUE)),
             Cell::plain(r.title.clone()),
             release,
             Cell::styled(timefmt::age_of(r.merged_at.as_deref()), &dim),

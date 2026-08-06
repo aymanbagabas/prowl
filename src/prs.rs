@@ -1,22 +1,38 @@
-//! My-open-PRs view: rows, sorting, styling, and table building. The `ST`
-//! column is the shared status glyph; remaining color-coding uses the shared
-//! Catppuccin palette.
+//! My-open-PRs view: rows, sorting, styling, and table building.
+//!
+//! One row is: a change marker, a single mergeability glyph (the whole "can I
+//! merge this?" answer), the PR number + title, an optional branch, and then the
+//! detail group that explains a blocked PR — a failing/running/passing check
+//! semaphore and the unresolved-review-thread count. Conflicts are *only* the
+//! glyph's job, so nothing is reported twice.
 
 use crate::model::PrNode;
 use crate::render::{self, Cell, Table};
-use crate::status::{self, BLUE, RED, Status};
+use crate::status::{self, BLUE, Checks, Lamp, Mergeable, PEACH, Status};
 use std::collections::HashSet;
 use uncurses::style::Style;
+
+/// Branch names are truncated to this many display columns.
+const BRANCH_WIDTH: usize = 28;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrRow {
     pub number: i64,
     pub is_draft: bool,
     pub title: String,
+    /// Head branch, rendered only with `--branch`.
+    pub branch: String,
+    /// The leading glyph: whether GitHub would let this merge right now.
+    pub mergeable: Mergeable,
+    /// Coarse CI/merge state; not rendered, it is the bell's change key.
     pub status: Option<Status>,
-    pub merge_state: Option<String>,
+    /// Failing / running / passing check runs on the last commit.
+    pub checks: Checks,
+    /// Unresolved review threads (capped at one page — see `unresolved_capped`).
+    pub unresolved: usize,
+    /// Whether the PR has more review threads than the page we counted.
+    pub unresolved_capped: bool,
     pub queue: Option<(i64, String)>,
-    pub fail: usize,
     pub url: String,
     pub updated_at: Option<String>,
 }
@@ -26,16 +42,21 @@ pub fn build_rows(nodes: Vec<PrNode>) -> Vec<PrRow> {
     let mut rows: Vec<PrRow> = nodes
         .into_iter()
         .map(|pr| {
-            let status = status::pr_status(&pr);
-            let fail = status::fail_count(status::last_suites(&pr));
+            let checks = pr.checks();
+            let mergeable =
+                status::mergeable_of(pr.merge_state_status.as_deref(), pr.mergeable.as_deref());
+            let (unresolved, unresolved_capped) = pr.review_threads.unresolved();
             PrRow {
                 number: pr.number,
                 is_draft: pr.is_draft,
-                status,
-                merge_state: pr.merge_state_status,
+                mergeable,
+                status: status::derive_status(mergeable, checks),
+                checks,
+                unresolved,
+                unresolved_capped,
                 queue: pr.merge_queue_entry.map(|e| (e.position, e.state)),
-                fail,
                 title: pr.title,
+                branch: pr.head_ref_name.unwrap_or_default(),
                 url: pr.url,
                 updated_at: pr.updated_at,
             }
@@ -58,75 +79,101 @@ pub fn without_queued(mut rows: Vec<PrRow>) -> Vec<PrRow> {
     rows
 }
 
-pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>) -> Table {
+/// Drop draft PRs (`--no-draft`).
+pub fn without_drafts(mut rows: Vec<PrRow>) -> Vec<PrRow> {
+    rows.retain(|r| !r.is_draft);
+    rows
+}
+
+pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>, show_branch: bool) -> Table {
+    let dim = Style::new().faint();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let mark = render::change_marker(highlight.contains(&r.number), ascii);
-        let st = match r.status {
-            Some(s) => render::status_cell(s, ascii),
-            None => Cell::styled("-".to_string(), Style::new().faint()),
-        };
-        let pr = if r.is_draft {
-            render::Cell::pr(r.number, r.url.clone(), Style::new().faint())
+        let (glyph, color) = (
+            status::mergeable_glyph(r.mergeable, ascii),
+            status::mergeable_style(r.mergeable).1,
+        );
+        let merge = Cell::styled(glyph.to_string(), status::fg(color));
+        // A draft's number is dimmed; the glyph already reports it as blocked.
+        let pr_style = if r.is_draft {
+            dim.clone()
         } else {
-            render::Cell::pr(r.number, r.url.clone(), status::fg(BLUE))
+            status::fg(BLUE)
         };
-        let state_raw = r.merge_state.clone().unwrap_or_else(|| "?".to_string());
-        let state_text = if ascii {
-            status::state_label(&state_raw).to_string()
+        let pr = Cell::pr(r.number, r.url.clone(), &pr_style);
+        let threads = if r.unresolved == 0 {
+            Cell::styled("0".to_string(), &dim)
         } else {
-            status::state_glyph(&state_raw).to_string()
+            let capped = if r.unresolved_capped { "+" } else { "" };
+            Cell::styled(
+                format!("{}{capped}", r.unresolved),
+                status::fg(PEACH).bold(),
+            )
         };
-        let state = Cell::styled(state_text, status::state_style(&state_raw));
-        let (fail_text, fail_style) = if r.fail == 0 {
-            ("-".to_string(), Style::new().faint())
-        } else {
-            (r.fail.to_string(), status::fg(RED).bold())
-        };
-        out.push(vec![
-            mark,
-            st,
-            pr,
-            Cell::plain(r.title.clone()),
-            state,
-            Cell::styled(fail_text, fail_style),
+
+        let mut row = vec![mark, merge, pr, Cell::plain(r.title.clone())];
+        if show_branch {
+            row.push(Cell::styled(
+                render::truncate(&r.branch, BRANCH_WIDTH, ascii),
+                &dim,
+            ));
+        }
+        row.extend([
+            render::lamp_cell(r.checks.fail, Lamp::Fail),
+            render::lamp_cell(r.checks.running, Lamp::Running),
+            render::lamp_cell(r.checks.pass, Lamp::Pass),
+            threads,
         ]);
+        out.push(row);
     }
-    Table {
-        header: vec!["", "", "PR", "TITLE", "STATE", "FAIL"],
-        rows: out,
+    let mut header = vec!["", "", "PR", "TITLE"];
+    if show_branch {
+        header.push("BRANCH");
     }
+    header.extend(["FAIL", "RUN", "PASS", "THREADS"]);
+    Table { header, rows: out }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CheckSuite, Commit, CommitNode, Commits, QueueEntry};
+    use crate::model::{
+        Commit, CommitNode, Commits, QueueEntry, ReviewThread, ReviewThreads, Rollup, RollupCounts,
+        StateCount,
+    };
 
-    fn pr(number: i64, mergeable: &str, state: &str, concls: &[Option<&str>]) -> PrNode {
+    /// A PR node with the given merge state and per-state check-run counts.
+    fn pr(number: i64, mergeable: &str, state: &str, runs: &[(&str, u64)]) -> PrNode {
         PrNode {
             number,
             title: format!("PR {number}"),
             url: format!("https://x/{number}"),
-            state: Some("OPEN".to_string()),
             mergeable: Some(mergeable.to_string()),
             merge_state_status: Some(state.to_string()),
             is_draft: false,
             updated_at: None,
+            head_ref_name: Some(format!("branch-{number}")),
             merge_queue_entry: None,
+            review_threads: ReviewThreads {
+                total_count: 0,
+                nodes: vec![],
+            },
             commits: Commits {
                 nodes: vec![CommitNode {
                     commit: Commit {
-                        check_suites: crate::model::CheckSuites {
-                            total_count: concls.len() as u64,
-                            nodes: concls
-                                .iter()
-                                .map(|c| CheckSuite {
-                                    conclusion: c.map(str::to_string),
-                                    check_runs: Some(crate::model::CheckRuns { total_count: 1 }),
-                                })
-                                .collect(),
-                        },
+                        status_check_rollup: Some(Rollup {
+                            contexts: RollupCounts {
+                                check_runs: runs
+                                    .iter()
+                                    .map(|(state, count)| StateCount {
+                                        state: (*state).to_string(),
+                                        count: *count,
+                                    })
+                                    .collect(),
+                                status_contexts: vec![],
+                            },
+                        }),
                     },
                 }],
             },
@@ -134,30 +181,89 @@ mod tests {
     }
 
     #[test]
-    fn sorts_by_updated_at_then_derives_status_and_fail() {
-        let mut a = pr(10, "MERGEABLE", "BLOCKED", &[Some("SUCCESS")]);
+    fn sorts_by_updated_at_then_derives_checks_and_mergeability() {
+        let mut a = pr(10, "MERGEABLE", "BLOCKED", &[("SUCCESS", 8)]);
         a.updated_at = Some("2026-06-19T10:00:00Z".to_string());
         let mut b = pr(
             42,
             "CONFLICTING",
             "DIRTY",
-            &[Some("FAILURE"), Some("FAILURE")],
+            &[("FAILURE", 2), ("IN_PROGRESS", 1), ("SUCCESS", 3)],
         );
         b.updated_at = Some("2026-06-19T09:00:00Z".to_string());
         // #10 was updated more recently than #42, so it sorts first despite the
         // lower number.
         let rows = build_rows(vec![a, b]);
         assert_eq!(rows[0].number, 10);
+        assert_eq!(rows[0].mergeable, Mergeable::Blocked);
+        assert_eq!(
+            rows[0].checks,
+            Checks {
+                fail: 0,
+                running: 0,
+                pass: 8
+            }
+        );
         assert_eq!(rows[0].status, Some(Status::Pass));
-        assert_eq!(rows[0].fail, 0);
         assert_eq!(rows[1].number, 42);
+        assert_eq!(rows[1].mergeable, Mergeable::Conflicts);
+        assert_eq!(
+            rows[1].checks,
+            Checks {
+                fail: 2,
+                running: 1,
+                pass: 3
+            }
+        );
         assert_eq!(rows[1].status, Some(Status::Conflicts));
-        assert_eq!(rows[1].fail, 2);
+    }
+
+    #[test]
+    fn counts_unresolved_review_threads() {
+        let mut p = pr(1, "MERGEABLE", "CLEAN", &[]);
+        p.review_threads = ReviewThreads {
+            total_count: 3,
+            nodes: vec![
+                ReviewThread { is_resolved: true },
+                ReviewThread { is_resolved: false },
+                ReviewThread { is_resolved: false },
+            ],
+        };
+        let rows = build_rows(vec![p]);
+        assert_eq!(rows[0].unresolved, 2);
+        assert!(!rows[0].unresolved_capped);
+    }
+
+    #[test]
+    fn flags_a_truncated_review_thread_page() {
+        let mut p = pr(1, "MERGEABLE", "CLEAN", &[]);
+        // The server reports 120 threads but we only fetched one page of 100.
+        p.review_threads = ReviewThreads {
+            total_count: 120,
+            nodes: (0..100)
+                .map(|_| ReviewThread { is_resolved: false })
+                .collect(),
+        };
+        let rows = build_rows(vec![p]);
+        assert_eq!(rows[0].unresolved, 100);
+        assert!(rows[0].unresolved_capped);
+        let table = to_table(&rows, true, &HashSet::new(), false);
+        // Last column is THREADS; the `+` says "at least this many".
+        assert_eq!(table.rows[0].last().unwrap().text, "100+");
+    }
+
+    #[test]
+    fn a_commit_without_a_rollup_has_no_checks() {
+        let mut p = pr(1, "MERGEABLE", "CLEAN", &[]);
+        p.commits.nodes[0].commit.status_check_rollup = None;
+        let rows = build_rows(vec![p]);
+        assert!(rows[0].checks.is_empty());
+        assert_eq!(rows[0].status, None);
     }
 
     #[test]
     fn queue_entry_becomes_position_and_state() {
-        let mut p = pr(1, "MERGEABLE", "CLEAN", &[Some("SUCCESS")]);
+        let mut p = pr(1, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)]);
         p.merge_queue_entry = Some(QueueEntry {
             position: 3,
             state: "QUEUED".to_string(),
@@ -168,24 +274,57 @@ mod tests {
 
     #[test]
     fn without_queued_drops_prs_in_the_merge_queue() {
-        let mut queued = pr(1, "MERGEABLE", "CLEAN", &[Some("SUCCESS")]);
+        let mut queued = pr(1, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)]);
         queued.merge_queue_entry = Some(QueueEntry {
             position: 1,
             state: "QUEUED".to_string(),
         });
-        let open = pr(2, "MERGEABLE", "CLEAN", &[Some("SUCCESS")]);
+        let open = pr(2, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)]);
         // #1 is queued, #2 isn't — only #2 remains in the open-PRs list.
         let rows = without_queued(build_rows(vec![queued, open]));
         assert_eq!(rows.iter().map(|r| r.number).collect::<Vec<_>>(), [2]);
     }
 
     #[test]
-    fn truncated_check_suites_degrade_pass_to_pending() {
-        // The server reports 50 suites but we only fetched 1; a failing suite
-        // could be hiding beyond the page, so the green is unproven -> pending.
-        let mut p = pr(1, "MERGEABLE", "CLEAN", &[Some("SUCCESS")]);
-        p.commits.nodes[0].commit.check_suites.total_count = 50;
-        let rows = build_rows(vec![p]);
-        assert_eq!(rows[0].status, Some(Status::Pending));
+    fn without_drafts_drops_draft_prs() {
+        let mut draft = pr(1, "MERGEABLE", "DRAFT", &[]);
+        draft.is_draft = true;
+        let ready = pr(2, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)]);
+        let rows = without_drafts(build_rows(vec![draft, ready]));
+        assert_eq!(rows.iter().map(|r| r.number).collect::<Vec<_>>(), [2]);
+    }
+
+    #[test]
+    fn branch_column_is_opt_in() {
+        let rows = build_rows(vec![pr(1, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)])]);
+        let plain = to_table(&rows, true, &HashSet::new(), false);
+        assert!(!plain.header.contains(&"BRANCH"));
+        let with_branch = to_table(&rows, true, &HashSet::new(), true);
+        assert_eq!(
+            with_branch.header,
+            [
+                "", "", "PR", "TITLE", "BRANCH", "FAIL", "RUN", "PASS", "THREADS"
+            ]
+        );
+        assert_eq!(with_branch.rows[0][4].text, "branch-1");
+    }
+
+    #[test]
+    fn semaphore_shows_all_three_counts() {
+        let rows = build_rows(vec![pr(
+            1,
+            "MERGEABLE",
+            "CLEAN",
+            &[
+                ("FAILURE", 2),
+                ("QUEUED", 1),
+                ("IN_PROGRESS", 2),
+                ("SUCCESS", 9),
+            ],
+        )]);
+        let table = to_table(&rows, true, &HashSet::new(), false);
+        // ..., FAIL, RUN, PASS, THREADS
+        let tail: Vec<&str> = table.rows[0][4..].iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(tail, ["2", "3", "9", "0"]);
     }
 }

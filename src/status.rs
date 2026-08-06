@@ -1,8 +1,7 @@
-//! Shared status palette — the single source of truth for the CI/PR status
-//! indicator, matching caarlos0's `tmux-window-icon` script. Catppuccin Mocha
-//! colors, Nerd Font glyphs, 24-bit truecolor.
+//! Shared status palette — the single source of truth for every glyph and color
+//! the dashboard draws: PR mergeability, the check-run semaphore, and review
+//! state. Catppuccin Mocha colors, Nerd Font glyphs, 24-bit truecolor.
 
-use crate::model::{CheckSuite, CheckSuites, PrNode};
 use uncurses::color::Color;
 use uncurses::style::Style;
 
@@ -14,28 +13,98 @@ pub const MAUVE: Color = Color::rgb(203, 166, 247); // #cba6f7
 pub const PEACH: Color = Color::rgb(250, 179, 135); // #fab387
 pub const BLUE: Color = Color::rgb(137, 180, 250); // #89b4fa
 pub const LAVENDER: Color = Color::rgb(180, 190, 254); // #b4befe
-pub const TEAL: Color = Color::rgb(148, 226, 213); // #94e2d5
-pub const PINK: Color = Color::rgb(245, 194, 231); // #f5c2e7 — "changed" marker
-pub const OVERLAY: Color = Color::rgb(147, 153, 178); // #9399b2 — muted accent
+pub const PINK: Color = Color::rgb(245, 194, 231); // #f5c2e7 — "changed since last refresh" marker
+pub const OVERLAY: Color = Color::rgb(147, 153, 178); // #9399b2 — muted accent (help legend)
 
-/// CI/PR status. Glyphs/colors are fixed by the shared palette.
+/// Coarse CI/merge state of an open PR. It is no longer rendered directly (the
+/// row shows a mergeability glyph plus a check-run semaphore); it exists as the
+/// bell's change key, so a finishing job doesn't ring but a red/green flip does.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
-    Merged,
     Conflicts,
     Fail,
     Pending,
     Pass,
 }
 
-/// All statuses in legend order.
-pub const ORDER: [Status; 5] = [
-    Status::Pass,
-    Status::Fail,
-    Status::Pending,
-    Status::Conflicts,
-    Status::Merged,
+/// Whether a PR can be merged right now — the single leading glyph of the
+/// "My open PRs" table. Everything GitHub reports as a reason it can't merge
+/// (blocked on reviews, behind the base, red required checks, draft) collapses
+/// into `Blocked`; a merge conflict gets its own lamp because it needs a rebase.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Mergeable {
+    /// Nothing in the way: GitHub would let you merge it now.
+    Ready,
+    /// Mergeable in principle, but something is holding it: reviews, required
+    /// checks, an out-of-date base, or draft status.
+    Blocked,
+    /// Conflicts with the base branch — needs a rebase or merge.
+    Conflicts,
+    /// GitHub hasn't computed mergeability yet.
+    Unknown,
+}
+
+/// Mergeability states in legend order.
+pub const MERGEABLE_ORDER: [Mergeable; 4] = [
+    Mergeable::Ready,
+    Mergeable::Blocked,
+    Mergeable::Conflicts,
+    Mergeable::Unknown,
 ];
+
+/// Collapse GitHub's `mergeStateStatus` (with `mergeable` as a fallback, since
+/// the two are computed by the same background job and one can land first) into
+/// the binary-ish "can I merge this?" answer the row leads with.
+pub fn mergeable_of(merge_state: Option<&str>, mergeable: Option<&str>) -> Mergeable {
+    if mergeable == Some("CONFLICTING") {
+        return Mergeable::Conflicts;
+    }
+    match merge_state {
+        Some("CLEAN" | "HAS_HOOKS") => Mergeable::Ready,
+        Some("BLOCKED" | "BEHIND" | "UNSTABLE" | "DRAFT") => Mergeable::Blocked,
+        Some("DIRTY") => Mergeable::Conflicts,
+        _ => Mergeable::Unknown,
+    }
+}
+
+/// Glyph + truecolor for a mergeability state.
+pub fn mergeable_style(m: Mergeable) -> (char, Color) {
+    match m {
+        Mergeable::Ready => ('\u{f00c}', GREEN),     // check
+        Mergeable::Blocked => ('\u{f05e}', YELLOW),  // ban
+        Mergeable::Conflicts => ('\u{f127}', RED),   // broken link
+        Mergeable::Unknown => ('\u{f128}', OVERLAY), // question mark
+    }
+}
+
+/// ASCII fallback letter for a mergeability state.
+pub fn mergeable_ascii(m: Mergeable) -> char {
+    match m {
+        Mergeable::Ready => 'y',
+        Mergeable::Blocked => 'n',
+        Mergeable::Conflicts => '!',
+        Mergeable::Unknown => '?',
+    }
+}
+
+/// The mergeability glyph to render, honoring the ASCII toggle.
+pub fn mergeable_glyph(m: Mergeable, ascii: bool) -> char {
+    if ascii {
+        mergeable_ascii(m)
+    } else {
+        mergeable_style(m).0
+    }
+}
+
+/// One-line meaning of a mergeability state (for the help legend).
+pub fn mergeable_meaning(m: Mergeable) -> &'static str {
+    match m {
+        Mergeable::Ready => "ready to merge",
+        Mergeable::Blocked => "blocked: reviews, required checks, behind, or draft",
+        Mergeable::Conflicts => "conflicts with the base branch \u{2014} needs a rebase",
+        Mergeable::Unknown => "mergeability not computed yet",
+    }
+}
 
 /// A reviewer's relationship to a PR, for the Reviews view's per-row glyph.
 /// Precedence when both apply: a pending request (re-review / awaiting) beats a
@@ -59,60 +128,6 @@ pub const REVIEW_ORDER: [ReviewState; 4] = [
     ReviewState::Updated,
     ReviewState::Reviewed,
 ];
-
-/// `mergeStateStatus` values in legend order.
-pub const STATE_ORDER: [&str; 8] = [
-    "CLEAN",
-    "UNSTABLE",
-    "BLOCKED",
-    "BEHIND",
-    "DIRTY",
-    "DRAFT",
-    "HAS_HOOKS",
-    "UNKNOWN",
-];
-
-/// Glyph + truecolor for a status — the single lookup both views share.
-pub fn status_style(s: Status) -> (char, Color) {
-    match s {
-        Status::Pass => ('\u{F058}', GREEN),
-        Status::Fail => ('\u{F057}', RED),
-        Status::Pending => ('\u{F111}', YELLOW),
-        Status::Merged => ('\u{E0A0}', MAUVE),
-        Status::Conflicts => ('\u{F071}', PEACH),
-    }
-}
-
-/// ASCII fallback letter for a status (non-Nerd-Font terminals / piped output).
-pub fn status_ascii(s: Status) -> char {
-    match s {
-        Status::Pass => 'P',
-        Status::Fail => 'x',
-        Status::Pending => '.',
-        Status::Merged => 'm',
-        Status::Conflicts => '!',
-    }
-}
-
-/// The glyph to render, honoring the ASCII toggle.
-pub fn glyph(s: Status, ascii: bool) -> char {
-    if ascii {
-        status_ascii(s)
-    } else {
-        status_style(s).0
-    }
-}
-
-/// One-line meaning of a status (for the help legend).
-pub fn status_meaning(s: Status) -> &'static str {
-    match s {
-        Status::Pass => "all checks passed",
-        Status::Fail => "at least one check failed",
-        Status::Pending => "checks are still running",
-        Status::Merged => "merged into its base branch",
-        Status::Conflicts => "merge conflict — needs a rebase",
-    }
-}
 
 /// Glyph + truecolor for a review state — the Reviews view's per-row indicator.
 pub fn review_style(s: ReviewState) -> (char, Color) {
@@ -153,209 +168,258 @@ pub fn review_meaning(s: ReviewState) -> &'static str {
     }
 }
 
-/// One-line meaning of a `mergeStateStatus` value (for the help legend).
-pub fn state_meaning(state: &str) -> &'static str {
-    match state {
-        "CLEAN" => "ready to merge; all required checks pass",
-        "UNSTABLE" => "mergeable, but some non-required checks are red or pending",
-        "BLOCKED" => "blocked on required reviews or checks",
-        "BEHIND" => "out of date with the base branch — needs an update",
-        "DIRTY" => "has merge conflicts",
-        "DRAFT" => "draft; not ready for review or merge",
-        "HAS_HOOKS" => "mergeable; pre-receive hooks will run on merge",
-        "UNKNOWN" => "mergeability not computed yet",
-        _ => "",
-    }
-}
-
-/// Truecolor style for a `mergeStateStatus` value, using the shared palette.
-pub fn state_style(state: &str) -> Style {
-    match state {
-        "CLEAN" | "HAS_HOOKS" => fg(GREEN),
-        "UNSTABLE" | "BLOCKED" | "BEHIND" => fg(YELLOW),
-        "DIRTY" | "DRAFT" => fg(RED),
-        _ => Style::new().faint(),
-    }
-}
-
-/// Display label for a `mergeStateStatus` value. GitHub's `DIRTY` reads as
-/// `CONFLICTS`; everything else is shown verbatim.
-pub fn state_label(state: &str) -> &str {
-    match state {
-        "DIRTY" => "CONFLICTS",
-        other => other,
-    }
-}
-
-/// Nerd Font glyph for a `mergeStateStatus` value (`FontAwesome` range, so it
-/// renders in any Nerd Font). Used on a TTY; `--ascii`/piped output falls back
-/// to [`state_label`].
-pub fn state_glyph(state: &str) -> char {
-    match state {
-        "CLEAN" | "HAS_HOOKS" => '\u{f00c}', // check
-        "UNSTABLE" => '\u{f06a}',            // exclamation-circle
-        "BLOCKED" => '\u{f023}',             // lock
-        "BEHIND" => '\u{f063}',              // arrow-down
-        "DIRTY" => '\u{f127}',               // broken link (conflict)
-        "DRAFT" => '\u{f040}',               // pencil
-        _ => '\u{f128}',                     // question mark
-    }
-}
-
+/// A truecolor foreground style.
 /// A foreground style for a palette color.
 pub fn fg(color: Color) -> Style {
     Style::new().fg(color)
 }
 
-/// Check-suite conclusions that count as a failure.
-pub const FAIL_CONCLUSIONS: [&str; 5] = [
-    "FAILURE",
-    "STARTUP_FAILURE",
-    "CANCELLED",
-    "TIMED_OUT",
-    "ACTION_REQUIRED",
-];
-
-/// Terminal-failure conclusions that are genuine even with zero runs: the suite
-/// failed before producing any check run, so the phantom filter must not mask
-/// it. A zero-run `FAILURE`/`CANCELLED`, by contrast, is a phantom subscription.
-const TERMINAL_FAIL_CONCLUSIONS: [&str; 1] = ["STARTUP_FAILURE"];
-
-/// Whether a check suite actually ran (produced ≥1 check run). Zero-run suites
-/// are phantom subscriptions GitHub ignores, so we do too; a `null` run count
-/// (an inaccessible suite) is treated the same way.
-fn ran(s: &CheckSuite) -> bool {
-    s.check_runs.as_ref().is_some_and(|r| r.total_count > 0)
+/// The three lamps of the per-PR check semaphore.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Lamp {
+    Fail,
+    Running,
+    Pass,
 }
 
-/// Count the check suites that concluded in a failing state. A suite counts if
-/// it ran, or if it concluded in a terminal failure that legitimately produces
-/// no runs (e.g. a zero-run `STARTUP_FAILURE`), which the phantom filter must
-/// not mask.
-pub fn fail_count(suites: &[CheckSuite]) -> usize {
-    suites
-        .iter()
-        .filter(|s| {
-            s.conclusion.as_deref().is_some_and(|c| {
-                FAIL_CONCLUSIONS.contains(&c) && (ran(s) || TERMINAL_FAIL_CONCLUSIONS.contains(&c))
-            })
-        })
-        .count()
-}
-
-/// Derive a PR's status with the precedence
-/// `merged > conflicts > fail > pending > pass > none`. Only check suites that
-/// actually ran are considered, so empty/phantom suites never turn a green PR
-/// red (or yellow).
-pub fn derive_status(
-    state: Option<&str>,
-    mergeable: Option<&str>,
-    suites: &[CheckSuite],
-) -> Option<Status> {
-    if state == Some("MERGED") {
-        return Some(Status::Merged);
+/// Truecolor for a lamp — red / yellow / green, straight from the palette.
+pub fn lamp_color(l: Lamp) -> Color {
+    match l {
+        Lamp::Fail => RED,
+        Lamp::Running => YELLOW,
+        Lamp::Pass => GREEN,
     }
-    if mergeable == Some("CONFLICTING") {
+}
+
+/// How many check runs sit on each lamp. Counts come straight from GitHub's
+/// rollup aggregates, so they are exact and unpaginated — no phantom
+/// zero-run suites and no truncated page to second-guess.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Checks {
+    pub fail: u64,
+    pub running: u64,
+    pub pass: u64,
+}
+
+impl Checks {
+    /// Whether the PR reported no checks at all.
+    pub fn is_empty(self) -> bool {
+        self.fail == 0 && self.running == 0 && self.pass == 0
+    }
+
+    /// The count on one lamp.
+    pub fn on(self, l: Lamp) -> u64 {
+        match l {
+            Lamp::Fail => self.fail,
+            Lamp::Running => self.running,
+            Lamp::Pass => self.pass,
+        }
+    }
+
+    /// Add `count` runs to the lamp `l` maps to (a state we don't know about is
+    /// simply not counted).
+    pub fn add(&mut self, l: Option<Lamp>, count: u64) {
+        match l {
+            Some(Lamp::Fail) => self.fail += count,
+            Some(Lamp::Running) => self.running += count,
+            Some(Lamp::Pass) => self.pass += count,
+            None => {}
+        }
+    }
+}
+
+/// Which lamp a `CheckRunState` lights up. `STALE` is deliberately unmapped:
+/// it neither blocks a merge nor is still running.
+pub fn check_run_lamp(state: &str) -> Option<Lamp> {
+    match state {
+        "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
+            Some(Lamp::Fail)
+        }
+        "QUEUED" | "IN_PROGRESS" | "PENDING" | "WAITING" | "REQUESTED" => Some(Lamp::Running),
+        "SUCCESS" | "NEUTRAL" | "SKIPPED" | "COMPLETED" => Some(Lamp::Pass),
+        _ => None,
+    }
+}
+
+/// Which lamp a legacy commit-status `StatusState` lights up.
+pub fn status_context_lamp(state: &str) -> Option<Lamp> {
+    match state {
+        "ERROR" | "FAILURE" => Some(Lamp::Fail),
+        "PENDING" | "EXPECTED" => Some(Lamp::Running),
+        "SUCCESS" => Some(Lamp::Pass),
+        _ => None,
+    }
+}
+
+/// The coarse bell key for an open PR, with the precedence
+/// `conflicts > fail > running > pass > none`.
+pub fn derive_status(m: Mergeable, c: Checks) -> Option<Status> {
+    if m == Mergeable::Conflicts {
         return Some(Status::Conflicts);
     }
-    if fail_count(suites) > 0 {
+    if c.fail > 0 {
         return Some(Status::Fail);
     }
-    if suites
-        .iter()
-        .filter(|s| ran(s))
-        .any(|s| s.conclusion.is_none())
-    {
+    if c.running > 0 {
         return Some(Status::Pending);
     }
-    if suites.iter().any(ran) {
+    if c.pass > 0 {
         return Some(Status::Pass);
     }
     None
 }
 
-/// The check suites of a PR's last commit (empty if none).
-pub fn last_suites(pr: &PrNode) -> &[CheckSuite] {
-    last_check_suites(pr).map_or(&[], |s| s.nodes.as_slice())
-}
-
-/// The last commit's check suites, with the server-reported total.
-fn last_check_suites(pr: &PrNode) -> Option<&CheckSuites> {
-    pr.commits.nodes.first().map(|c| &c.commit.check_suites)
-}
-
-/// Derive a PR node's status from its fields.
-pub fn pr_status(pr: &PrNode) -> Option<Status> {
-    let status = derive_status(
-        pr.state.as_deref(),
-        pr.mergeable.as_deref(),
-        last_suites(pr),
-    );
-    // We only fetch the first page of check suites; if the server reports more
-    // than we received, a dropped suite could be failing — a "pass" is unproven,
-    // so surface it as pending rather than a false green.
-    if status == Some(Status::Pass)
-        && last_check_suites(pr).is_some_and(|s| s.total_count > s.nodes.len() as u64)
-    {
-        return Some(Status::Pending);
-    }
-    status
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::CheckRuns;
 
-    fn suites(concls: &[Option<&str>]) -> Vec<CheckSuite> {
-        concls
-            .iter()
-            .map(|c| CheckSuite {
-                conclusion: c.map(str::to_string),
-                check_runs: Some(CheckRuns { total_count: 1 }),
-            })
-            .collect()
-    }
-
-    /// A check suite with an explicit run count (0 = phantom).
-    fn suite(conclusion: Option<&str>, runs: u64) -> CheckSuite {
-        CheckSuite {
-            conclusion: conclusion.map(str::to_string),
-            check_runs: Some(CheckRuns { total_count: runs }),
+    /// Build a `Checks` from (fail, running, pass).
+    fn checks(fail: u64, running: u64, pass: u64) -> Checks {
+        Checks {
+            fail,
+            running,
+            pass,
         }
     }
 
     #[test]
-    fn palette_glyphs_and_colors_are_exact() {
-        assert_eq!(
-            status_style(Status::Pass),
-            ('\u{F058}', Color::rgb(166, 227, 161))
-        );
-        assert_eq!(
-            status_style(Status::Fail),
-            ('\u{F057}', Color::rgb(243, 139, 168))
-        );
-        assert_eq!(
-            status_style(Status::Pending),
-            ('\u{F111}', Color::rgb(249, 226, 175))
-        );
-        assert_eq!(
-            status_style(Status::Merged),
-            ('\u{E0A0}', Color::rgb(203, 166, 247))
-        );
-        assert_eq!(
-            status_style(Status::Conflicts),
-            ('\u{F071}', Color::rgb(250, 179, 135))
-        );
+    fn mergeable_palette_glyphs_colors_and_letters() {
+        assert_eq!(mergeable_style(Mergeable::Ready), ('\u{f00c}', GREEN));
+        assert_eq!(mergeable_style(Mergeable::Blocked), ('\u{f05e}', YELLOW));
+        assert_eq!(mergeable_style(Mergeable::Conflicts), ('\u{f127}', RED));
+        assert_eq!(mergeable_style(Mergeable::Unknown), ('\u{f128}', OVERLAY));
+        assert_eq!(mergeable_ascii(Mergeable::Ready), 'y');
+        assert_eq!(mergeable_ascii(Mergeable::Blocked), 'n');
+        assert_eq!(mergeable_ascii(Mergeable::Conflicts), '!');
+        assert_eq!(mergeable_ascii(Mergeable::Unknown), '?');
+        // The ASCII toggle picks the letter; otherwise the glyph.
+        assert_eq!(mergeable_glyph(Mergeable::Ready, true), 'y');
+        assert_eq!(mergeable_glyph(Mergeable::Ready, false), '\u{f00c}');
     }
 
     #[test]
-    fn ascii_letters() {
-        assert_eq!(status_ascii(Status::Pass), 'P');
-        assert_eq!(status_ascii(Status::Fail), 'x');
-        assert_eq!(status_ascii(Status::Pending), '.');
-        assert_eq!(status_ascii(Status::Merged), 'm');
-        assert_eq!(status_ascii(Status::Conflicts), '!');
+    fn merge_state_collapses_to_one_answer() {
+        assert_eq!(
+            mergeable_of(Some("CLEAN"), Some("MERGEABLE")),
+            Mergeable::Ready
+        );
+        assert_eq!(
+            mergeable_of(Some("HAS_HOOKS"), Some("MERGEABLE")),
+            Mergeable::Ready
+        );
+        for blocked in ["BLOCKED", "BEHIND", "UNSTABLE", "DRAFT"] {
+            assert_eq!(
+                mergeable_of(Some(blocked), Some("MERGEABLE")),
+                Mergeable::Blocked,
+                "{blocked}"
+            );
+        }
+        assert_eq!(
+            mergeable_of(Some("DIRTY"), Some("CONFLICTING")),
+            Mergeable::Conflicts
+        );
+        // `mergeable` can land before `mergeStateStatus` does: a known conflict
+        // wins over an as-yet-uncomputed merge state.
+        assert_eq!(
+            mergeable_of(Some("UNKNOWN"), Some("CONFLICTING")),
+            Mergeable::Conflicts
+        );
+        assert_eq!(mergeable_of(Some("UNKNOWN"), None), Mergeable::Unknown);
+        assert_eq!(mergeable_of(None, None), Mergeable::Unknown);
+    }
+
+    #[test]
+    fn review_letters_are_distinct_from_mergeable_letters() {
+        let letters: Vec<char> = MERGEABLE_ORDER
+            .iter()
+            .map(|m| mergeable_ascii(*m))
+            .collect();
+        for r in REVIEW_ORDER {
+            assert!(
+                !letters.contains(&review_ascii(r)),
+                "review letter for {r:?} collides with a mergeability letter"
+            );
+        }
+    }
+
+    #[test]
+    fn check_run_states_map_to_lamps() {
+        for red in [
+            "FAILURE",
+            "TIMED_OUT",
+            "CANCELLED",
+            "ACTION_REQUIRED",
+            "STARTUP_FAILURE",
+        ] {
+            assert_eq!(check_run_lamp(red), Some(Lamp::Fail), "{red}");
+        }
+        for yellow in ["QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"] {
+            assert_eq!(check_run_lamp(yellow), Some(Lamp::Running), "{yellow}");
+        }
+        for green in ["SUCCESS", "NEUTRAL", "SKIPPED", "COMPLETED"] {
+            assert_eq!(check_run_lamp(green), Some(Lamp::Pass), "{green}");
+        }
+        // STALE blocks nothing and isn't running, so it lights no lamp.
+        assert_eq!(check_run_lamp("STALE"), None);
+        assert_eq!(check_run_lamp("WHATEVER"), None);
+    }
+
+    #[test]
+    fn status_context_states_map_to_lamps() {
+        assert_eq!(status_context_lamp("ERROR"), Some(Lamp::Fail));
+        assert_eq!(status_context_lamp("FAILURE"), Some(Lamp::Fail));
+        assert_eq!(status_context_lamp("PENDING"), Some(Lamp::Running));
+        assert_eq!(status_context_lamp("EXPECTED"), Some(Lamp::Running));
+        assert_eq!(status_context_lamp("SUCCESS"), Some(Lamp::Pass));
+        assert_eq!(status_context_lamp("WHATEVER"), None);
+    }
+
+    #[test]
+    fn adding_counts_fills_the_right_lamp() {
+        let mut c = Checks::default();
+        assert!(c.is_empty());
+        c.add(Some(Lamp::Fail), 2);
+        c.add(Some(Lamp::Running), 3);
+        c.add(Some(Lamp::Pass), 10);
+        c.add(None, 99); // an unmapped state is dropped
+        assert_eq!(c, checks(2, 3, 10));
+        assert_eq!(c.on(Lamp::Fail), 2);
+        assert_eq!(c.on(Lamp::Running), 3);
+        assert_eq!(c.on(Lamp::Pass), 10);
+        assert!(!c.is_empty());
+    }
+
+    #[test]
+    fn lamp_colors_are_a_semaphore() {
+        assert_eq!(lamp_color(Lamp::Fail), RED);
+        assert_eq!(lamp_color(Lamp::Running), YELLOW);
+        assert_eq!(lamp_color(Lamp::Pass), GREEN);
+    }
+
+    #[test]
+    fn precedence_is_respected() {
+        // Conflicts beat failing checks.
+        assert_eq!(
+            derive_status(Mergeable::Conflicts, checks(2, 1, 5)),
+            Some(Status::Conflicts)
+        );
+        // Fail beats running.
+        assert_eq!(
+            derive_status(Mergeable::Blocked, checks(1, 3, 5)),
+            Some(Status::Fail)
+        );
+        // Running beats pass.
+        assert_eq!(
+            derive_status(Mergeable::Ready, checks(0, 3, 5)),
+            Some(Status::Pending)
+        );
+        // All green.
+        assert_eq!(
+            derive_status(Mergeable::Ready, checks(0, 0, 5)),
+            Some(Status::Pass)
+        );
+        // No checks at all -> nothing to report.
+        assert_eq!(derive_status(Mergeable::Ready, Checks::default()), None);
     }
 
     #[test]
@@ -371,159 +435,5 @@ mod tests {
         // The ASCII toggle picks the letter; otherwise the glyph.
         assert_eq!(review_glyph(ReviewState::Updated, true), '^');
         assert_eq!(review_glyph(ReviewState::Updated, false), '\u{F0AA}');
-    }
-
-    #[test]
-    fn review_letters_are_distinct_from_status_letters() {
-        let status_letters: Vec<char> = ORDER.iter().map(|s| status_ascii(*s)).collect();
-        for r in REVIEW_ORDER {
-            assert!(
-                !status_letters.contains(&review_ascii(r)),
-                "review letter for {r:?} collides with a status letter"
-            );
-        }
-    }
-
-    #[test]
-    fn precedence_is_respected() {
-        // merged beats everything, even conflicts + failures.
-        let s = suites(&[Some("FAILURE")]);
-        assert_eq!(
-            derive_status(Some("MERGED"), Some("CONFLICTING"), &s),
-            Some(Status::Merged)
-        );
-        // conflicts beats failing checks.
-        assert_eq!(
-            derive_status(Some("OPEN"), Some("CONFLICTING"), &s),
-            Some(Status::Conflicts)
-        );
-        // fail beats pending.
-        let s = suites(&[Some("FAILURE"), None]);
-        assert_eq!(
-            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
-            Some(Status::Fail)
-        );
-        // pending beats pass.
-        let s = suites(&[Some("SUCCESS"), None]);
-        assert_eq!(
-            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
-            Some(Status::Pending)
-        );
-        // all concluded, no failures -> pass.
-        let s = suites(&[Some("SUCCESS"), Some("NEUTRAL")]);
-        assert_eq!(
-            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
-            Some(Status::Pass)
-        );
-        // no check suites -> none.
-        assert_eq!(derive_status(Some("OPEN"), Some("MERGEABLE"), &[]), None);
-    }
-
-    #[test]
-    fn counts_only_failing_conclusions() {
-        let s = suites(&[
-            Some("SUCCESS"),
-            Some("FAILURE"),
-            Some("CANCELLED"),
-            Some("STARTUP_FAILURE"),
-            Some("TIMED_OUT"),
-            Some("ACTION_REQUIRED"),
-            None,
-            Some("NEUTRAL"),
-        ]);
-        assert_eq!(fail_count(&s), 5);
-    }
-
-    #[test]
-    fn timed_out_counts_as_failure() {
-        let s = suites(&[Some("TIMED_OUT")]);
-        assert_eq!(fail_count(&s), 1);
-        assert_eq!(
-            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
-            Some(Status::Fail)
-        );
-    }
-
-    #[test]
-    fn phantom_zero_run_suites_are_ignored() {
-        // A CLEAN, mergeable PR (github/copilot-agent-runtime#10703) whose only
-        // "failures" are zero-run notify-pending-deployment suites, plus a pile
-        // of never-running QUEUED app subscriptions, is green — not red/yellow.
-        let s = vec![
-            suite(Some("SUCCESS"), 22),
-            suite(Some("SUCCESS"), 35),
-            suite(Some("FAILURE"), 0), // phantom: notify-pending-deployment.yml
-            suite(Some("FAILURE"), 0),
-            suite(None, 0), // phantom: QUEUED app that never ran
-            suite(None, 0),
-        ];
-        assert_eq!(fail_count(&s), 0);
-        assert_eq!(
-            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
-            Some(Status::Pass)
-        );
-        // A real failing run (runs > 0) still counts.
-        let s = vec![suite(Some("SUCCESS"), 3), suite(Some("FAILURE"), 1)];
-        assert_eq!(fail_count(&s), 1);
-        assert_eq!(
-            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
-            Some(Status::Fail)
-        );
-        // Only phantom suites -> no real CI -> none.
-        let s = vec![suite(Some("FAILURE"), 0), suite(None, 0)];
-        assert_eq!(derive_status(Some("OPEN"), Some("MERGEABLE"), &s), None);
-    }
-
-    #[test]
-    fn zero_run_startup_failure_counts_as_failing() {
-        // A genuine terminal failure: the suite failed to start, so it produced
-        // zero runs. Unlike a zero-run FAILURE/CANCELLED phantom, it must not be
-        // masked by the phantom filter — a broken pipeline can't read green.
-        let s = vec![suite(Some("SUCCESS"), 4), suite(Some("STARTUP_FAILURE"), 0)];
-        assert_eq!(fail_count(&s), 1);
-        assert_eq!(
-            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
-            Some(Status::Fail)
-        );
-        // A lone zero-run STARTUP_FAILURE is still a failure, not "none".
-        let s = vec![suite(Some("STARTUP_FAILURE"), 0)];
-        assert_eq!(
-            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
-            Some(Status::Fail)
-        );
-    }
-
-    #[test]
-    fn state_styles_match_palette() {
-        let s = |state| state_style(state).to_string();
-        assert_eq!(s("CLEAN"), fg(GREEN).to_string());
-        assert_eq!(s("UNSTABLE"), fg(YELLOW).to_string());
-        assert_eq!(s("BLOCKED"), fg(YELLOW).to_string());
-        assert_eq!(s("DIRTY"), fg(RED).to_string());
-        assert_eq!(s("WHATEVER"), Style::new().faint().to_string());
-    }
-
-    #[test]
-    fn dirty_is_labelled_conflicts() {
-        assert_eq!(state_label("DIRTY"), "CONFLICTS");
-        assert_eq!(state_label("CLEAN"), "CLEAN");
-        assert_eq!(state_label("BLOCKED"), "BLOCKED");
-    }
-
-    #[test]
-    fn state_glyphs_are_distinct_from_status_glyphs() {
-        let states = [
-            "CLEAN", "UNSTABLE", "BLOCKED", "BEHIND", "DIRTY", "DRAFT", "UNKNOWN",
-        ];
-        let status_glyphs: Vec<char> = ORDER.iter().map(|s| status_style(*s).0).collect();
-        for st in states {
-            let g = state_glyph(st);
-            assert!(
-                !status_glyphs.contains(&g),
-                "state glyph for {st} collides with a status glyph"
-            );
-        }
-        assert_eq!(state_glyph("CLEAN"), '\u{f00c}');
-        assert_eq!(state_glyph("DIRTY"), '\u{f127}');
     }
 }

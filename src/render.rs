@@ -11,7 +11,7 @@
 //! special-casing here.
 
 use crate::cli::View;
-use crate::status;
+use crate::status::{self, Lamp};
 use uncurses::ansi::truncate::truncate as truncate_tail;
 use uncurses::buffer::{Bounded, Surface, SurfaceMut, TextBuffer, View as BufView};
 use uncurses::color::{Color, Profile};
@@ -25,6 +25,16 @@ pub const MAX_WIDTH: usize = 120;
 
 /// Two blank columns separate adjacent table columns.
 const SEP: usize = 2;
+
+/// One lamp of the check semaphore: dim when zero, its palette color (bold)
+/// when not, so only the counts that matter catch the eye.
+pub fn lamp_cell(n: u64, lamp: Lamp) -> Cell {
+    if n == 0 {
+        Cell::styled("0".to_string(), Style::new().faint())
+    } else {
+        Cell::styled(n.to_string(), status::fg(status::lamp_color(lamp)).bold())
+    }
+}
 
 /// One table cell: visible text plus its style. The style carries any OSC-8
 /// link (uncurses styles hold the hyperlink), so there is no separate field.
@@ -210,10 +220,15 @@ pub fn render_table(table: &Table, styled: bool) -> String {
     String::from_utf8(out).expect("uncurses encodes valid UTF-8")
 }
 
-/// Paint a dim one-liner (an empty-section placeholder, the error line) at row
-/// `y`. Returns y + 1.
+/// Paint a dim one-liner (the error line, `Loading...`) at row `y`, flush left.
+/// Returns y + 1.
 pub fn paint_dim(s: &mut impl TextSurface, msg: &str, y: u16) -> u16 {
-    s.set_str((0, y), msg, Style::new().faint());
+    paint_dim_at(s, msg, 0, y)
+}
+
+/// Paint a dim one-liner indented by `indent` columns. Returns y + 1.
+pub fn paint_dim_at(s: &mut impl TextSurface, msg: &str, indent: u16, y: u16) -> u16 {
+    s.set_str((indent, y), msg, Style::new().faint());
     y + 1
 }
 
@@ -254,14 +269,10 @@ pub fn paint_header(
     y + 1
 }
 
-/// A status glyph cell: the Nerd Font glyph (or ASCII letter) in the status's
-/// palette color.
-pub fn status_cell(status: status::Status, ascii: bool) -> Cell {
-    Cell::styled(
-        status::glyph(status, ascii).to_string(),
-        status::fg(status::status_style(status).1),
-    )
-}
+/// Where a table row's PR column starts: the (blank) marker cell and the
+/// per-row glyph cell, each one column wide, plus their two-space separators.
+/// Empty-section placeholders are indented by it so they read as a row.
+pub const ROW_INDENT: u16 = 6;
 
 /// A leading cell marking a row that changed since the previous refresh.
 pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
@@ -303,6 +314,7 @@ pub fn paint_footer(
         ("r", refresh.as_str()),
         ("tab", "switch view"),
         ("enter", "open"),
+        ("y", "copy"),
         ("/", "search"),
         ("?", "help"),
     ];
@@ -453,35 +465,18 @@ pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -
 
     // The footer only lists the action keys, so document the movement cursor here.
     let sep = if ascii { " | " } else { "  \u{b7}  " };
-    let keys =
-        format!("j/k move{sep}g/G first/last{sep}^D/^U half page{sep}enter open{sep}/ filter");
+    let keys = format!(
+        "j/k move{sep}g/G first/last{sep}^D/^U half page{sep}enter open{sep}y copy link{sep}Y copy section{sep}/ filter"
+    );
     s.set_str((2, y), &keys, &dim);
     y += 1;
 
     match view {
         View::Mine => {
-            for st in status::ORDER {
-                let glyph = status::glyph(st, ascii).to_string();
-                let color = status::fg(status::status_style(st).1);
-                legend_row(s, &glyph, color, status::status_meaning(st), &dim, y);
-                y += 1;
-            }
-            s.set_str((2, y), "- no checks reported yet", &dim);
-            y += 1;
-
-            for st in status::STATE_ORDER {
-                let meaning = status::state_meaning(st);
-                let c = status::state_style(st);
-                if ascii {
-                    // Label form (matches the ASCII/piped STATE column).
-                    let p = s.set_str((2, y), status::state_label(st), c);
-                    if !meaning.is_empty() {
-                        s.set_str((p.x, y), &format!(" \u{2014} {meaning}"), &dim);
-                    }
-                } else {
-                    // Glyph form (matches the Nerd Font STATE column).
-                    legend_row(s, &status::state_glyph(st).to_string(), c, meaning, &dim, y);
-                }
+            for m in status::MERGEABLE_ORDER {
+                let glyph = status::mergeable_glyph(m, ascii).to_string();
+                let color = status::fg(status::mergeable_style(m).1);
+                legend_row(s, &glyph, color, status::mergeable_meaning(m), &dim, y);
                 y += 1;
             }
         }
@@ -492,12 +487,6 @@ pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -
                 legend_row(s, &glyph, color, status::review_meaning(r), &dim, y);
                 y += 1;
             }
-            // The "Reviewed & merged" section leads each row with the merged glyph.
-            let merged = status::Status::Merged;
-            let glyph = status::glyph(merged, ascii).to_string();
-            let color = status::fg(status::status_style(merged).1);
-            legend_row(s, &glyph, color, status::status_meaning(merged), &dim, y);
-            y += 1;
         }
     }
     y
@@ -507,8 +496,8 @@ pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -
 /// line + one row per entry), so callers can size a surface before painting.
 pub fn help_height(view: View) -> usize {
     2 + match view {
-        View::Mine => status::ORDER.len() + 1 + status::STATE_ORDER.len(),
-        View::Reviews => status::REVIEW_ORDER.len() + 1,
+        View::Mine => status::MERGEABLE_ORDER.len(),
+        View::Reviews => status::REVIEW_ORDER.len(),
     }
 }
 
@@ -650,7 +639,7 @@ mod tests {
     fn padding_uses_display_width_for_glyphs() {
         // The check-circle glyph is one display column but several bytes; the
         // following column must still line up by display width.
-        let glyph = status::status_style(status::Status::Pass).0;
+        let glyph = status::mergeable_style(status::Mergeable::Ready).0;
         let table = Table {
             header: vec!["ST", "PR"],
             rows: vec![
@@ -712,7 +701,7 @@ mod tests {
         });
         assert_eq!(
             plain,
-            "r refresh (every 5m) - tab switch view - enter open - / search - ? help"
+            "r refresh (every 5m) - tab switch view - enter open - y copy - / search - ? help"
         );
 
         // While a refresh is in flight the first hint says so instead.

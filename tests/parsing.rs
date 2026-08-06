@@ -3,7 +3,7 @@
 //! rows and rendered. No network access.
 
 use prowl::model::{MergedData, MineData, QueueData, ReviewsData};
-use prowl::status::{ReviewState, Status};
+use prowl::status::{Checks, Mergeable, ReviewState, Status};
 use prowl::{github, merged, prs, queue, render, reviews};
 use std::collections::HashSet;
 
@@ -32,6 +32,39 @@ fn queue_parses_orders_and_flags_mine() {
     // A null author renders as "ghost" and is never mine.
     assert_eq!(rows[2].author, "ghost");
     assert!(!rows[2].mine);
+}
+
+#[test]
+fn queue_counts_speculative_build_checks() {
+    let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
+    let rows = queue::build_rows(model_queue_nodes(data), "caarlos0");
+
+    // #101: 1 failing + 3 running + 6 passing check runs, plus one passing
+    // legacy status context folded into the same semaphore.
+    assert_eq!(
+        rows[0].checks,
+        Checks {
+            fail: 1,
+            running: 3,
+            pass: 7,
+        }
+    );
+    // #102 has nothing failing.
+    assert_eq!(
+        rows[1].checks,
+        Checks {
+            fail: 0,
+            running: 2,
+            pass: 8,
+        }
+    );
+    // #103's speculative commit has no checks at all.
+    assert_eq!(rows[2].checks, Checks::default());
+
+    let out = render::render_table(&queue::to_table(&rows, true), false);
+    assert!(out.contains("FAIL"));
+    assert!(out.contains("RUN"));
+    assert!(out.contains("PASS"));
 }
 
 #[test]
@@ -110,48 +143,84 @@ fn queue_build_time_is_earliest_check_run_start() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn mine_parses_sorts_and_derives_status_and_fail() {
+fn mine_parses_sorts_and_derives_mergeability_and_checks() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
     let rows = prs::build_rows(data.search.nodes);
 
     // Sorted by last update time (most recent first).
     assert_eq!(
         rows.iter().map(|r| r.number).collect::<Vec<_>>(),
-        vec![6656, 6475, 5323]
+        vec![6475, 5323, 6656]
     );
     let upd: Vec<&Option<String>> = rows.iter().map(|r| &r.updated_at).collect();
     assert!(upd.windows(2).all(|w| w[0] >= w[1]), "updatedAt descending");
-    // #6656 is mergeable; its only non-success suite is a zero-run phantom, so
-    // it is green (pass) with no failures — not pending.
-    assert_eq!(rows[0].status, Some(Status::Pass));
-    assert_eq!(rows[0].fail, 0);
-    // #6475 conflicts (which beats its failing checks), but the FAIL count is
-    // still the real number of failing suites that actually ran.
-    assert_eq!(rows[1].status, Some(Status::Conflicts));
-    assert_eq!(rows[1].fail, 3);
-    // #5323 conflicts with no check suites -> no fails.
-    assert_eq!(rows[2].status, Some(Status::Conflicts));
-    assert_eq!(rows[2].fail, 0);
+
+    // #6475 conflicts (DIRTY), and its rollup has 4 failing runs; NEUTRAL and
+    // SUCCESS both count as passed.
+    assert_eq!(rows[0].mergeable, Mergeable::Conflicts);
+    assert_eq!(
+        rows[0].checks,
+        Checks {
+            fail: 4,
+            running: 0,
+            pass: 17
+        }
+    );
+    assert_eq!(rows[0].status, Some(Status::Conflicts));
+    assert_eq!(rows[0].branch, "goreleaser-install-script");
+
+    // #5323 conflicts and has no checks at all.
+    assert_eq!(rows[1].mergeable, Mergeable::Conflicts);
+    assert!(rows[1].checks.is_empty());
+
+    // #6656 is BLOCKED (waiting on a review), all checks green.
+    assert_eq!(rows[2].mergeable, Mergeable::Blocked);
+    assert_eq!(
+        rows[2].checks,
+        Checks {
+            fail: 0,
+            running: 0,
+            pass: 20
+        }
+    );
+    assert_eq!(rows[2].status, Some(Status::Pass));
 }
 
 #[test]
-fn mine_ascii_status_letters() {
+fn mine_ascii_mergeable_letters() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
     let rows = prs::build_rows(data.search.nodes);
-    let table = prs::to_table(&rows, true, &HashSet::new()); // ascii, no highlights
-    // Column 0 is the change marker; column 1 is the status glyph.
+    let table = prs::to_table(&rows, true, &HashSet::new(), false); // ascii, no highlights
+    // Column 0 is the change marker; column 1 is the mergeability glyph.
     let st: Vec<&str> = table.rows.iter().map(|r| r[1].text.as_str()).collect();
-    assert_eq!(st, vec!["P", "!", "!"]); // pass, conflicts, conflicts
+    assert_eq!(st, vec!["!", "!", "n"]); // conflicts, conflicts, blocked
+}
+
+#[test]
+fn mine_renders_the_check_semaphore_and_thread_count() {
+    let data: MineData = parse(include_str!("fixtures/mine.json"));
+    let rows = prs::build_rows(data.search.nodes);
+    let table = prs::to_table(&rows, true, &HashSet::new(), false);
+    assert_eq!(
+        table.header,
+        ["", "", "PR", "TITLE", "FAIL", "RUN", "PASS", "THREADS"]
+    );
+    // #6475: 4 failing, none running, 17 passed, no unresolved threads.
+    let tail: Vec<&str> = table.rows[0][4..].iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(tail, ["4", "0", "17", "0"]);
+    // #5323 has no checks at all — every lamp reads zero.
+    let tail: Vec<&str> = table.rows[1][4..].iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(tail, ["0", "0", "0", "0"]);
 }
 
 #[test]
 fn mine_changed_rows_get_a_marker() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
     let rows = prs::build_rows(data.search.nodes);
-    let highlight = HashSet::from([6475]);
-    let table = prs::to_table(&rows, true, &highlight);
+    let highlight = HashSet::from([5323]);
+    let table = prs::to_table(&rows, true, &highlight, false);
     let marks: Vec<&str> = table.rows.iter().map(|r| r[0].text.as_str()).collect();
-    assert_eq!(marks, vec![" ", ">", " "]); // only #6475 is flagged
+    assert_eq!(marks, vec![" ", ">", " "]); // only #5323 is flagged
 }
 
 #[test]
@@ -161,27 +230,28 @@ fn mine_empty_yields_no_rows() {
 }
 
 #[test]
-fn mine_tolerates_null_check_runs_and_partial_errors() {
-    // GitHub returns a null `checkRuns` for a suite the viewer can't see, and
-    // attaches a top-level `errors` array. The response must still parse (the
-    // suite deserializes as `None`) and that suite must be ignored as a phantom
-    // rather than failing the whole fetch.
-    let data: MineData = parse(include_str!("fixtures/mine_null_checkruns.json"));
+fn mine_tolerates_a_missing_rollup_and_partial_errors() {
+    // GitHub returns a null `statusCheckRollup` for a commit with no checks and
+    // attaches a top-level `errors` array. The response must still parse and
+    // simply report an empty semaphore rather than failing the whole fetch.
+    let data: MineData = parse(include_str!("fixtures/mine_no_rollup.json"));
     let rows = prs::build_rows(data.search.nodes);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].number, 123);
-    // The accessible suite passed; the inaccessible (null) one is ignored.
-    assert_eq!(rows[0].status, Some(Status::Pass));
-    assert_eq!(rows[0].fail, 0);
+    assert!(rows[0].checks.is_empty());
+    assert_eq!(rows[0].status, None);
+    // One of its two review threads is still unresolved.
+    assert_eq!(rows[0].unresolved, 1);
+    assert!(!rows[0].unresolved_capped);
 }
 
 #[test]
 fn mine_partial_null_surfaces_graphql_error() {
-    // `data` is present but a required (non-Option) field — `checkSuites` — is
-    // null, so typing the data fails. With an `errors` array attached, the real
-    // GitHub message must surface instead of a generic JSON parse error.
+    // `data` is present but a required (non-Option) field — `commits` — is null,
+    // so typing the data fails. With an `errors` array attached, the real GitHub
+    // message must surface instead of a generic JSON parse error.
     let err = github::parse_graphql::<MineData>(
-        include_str!("fixtures/mine_null_checksuites.json").as_bytes(),
+        include_str!("fixtures/mine_null_commits.json").as_bytes(),
     )
     .expect_err("a null non-Option field should fail to type");
     assert!(

@@ -4,7 +4,7 @@
 
 use crate::model::{MergedNode, ReviewPrNode, ReviewsData};
 use crate::render::{self, Cell, Table};
-use crate::status::{self, BLUE, ReviewState, Status};
+use crate::status::{self, BLUE, ReviewState};
 use crate::timefmt;
 use std::collections::{HashMap, HashSet};
 use uncurses::style::Style;
@@ -106,18 +106,25 @@ pub fn build_open_rows(data: ReviewsData) -> Vec<ReviewRow> {
     rows
 }
 
+/// Drop draft PRs (`--no-draft`).
+pub fn without_drafts(mut rows: Vec<ReviewRow>) -> Vec<ReviewRow> {
+    rows.retain(|r| !r.is_draft);
+    rows
+}
+
 pub fn open_to_table(rows: &[ReviewRow], ascii: bool) -> Table {
     let dim = Style::new().faint();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
+        let glyph = status::review_glyph(r.state, ascii);
         let st = Cell::styled(
-            status::review_glyph(r.state, ascii).to_string(),
+            glyph.to_string(),
             status::fg(status::review_style(r.state).1),
         );
         let pr = if r.is_draft {
-            render::Cell::pr(r.number, r.url.clone(), &dim)
+            Cell::pr(r.number, r.url.clone(), &dim)
         } else {
-            render::Cell::pr(r.number, r.url.clone(), status::fg(BLUE))
+            Cell::pr(r.number, r.url.clone(), status::fg(BLUE))
         };
         out.push(vec![
             // A leading (always-blank) margin column keeps the two reviews
@@ -172,9 +179,12 @@ pub fn merged_to_table(rows: &[ReviewedMergedRow], ascii: bool) -> Table {
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         out.push(vec![
+            // Two blank margin columns keep this table aligned with the open
+            // reviews table (marker + state glyph); every row here is merged, so
+            // a per-row glyph would say nothing.
             Cell::plain(" "),
-            render::status_cell(Status::Merged, ascii),
-            render::Cell::pr(r.number, r.url.clone(), status::fg(BLUE)),
+            Cell::plain(" "),
+            Cell::pr(r.number, r.url.clone(), status::fg(BLUE)),
             Cell::plain(r.title.clone()),
             Cell::styled(render::truncate(&r.author, AUTHOR_WIDTH, ascii), &dim),
             Cell::styled(timefmt::age_of(r.merged_at.as_deref()), &dim),

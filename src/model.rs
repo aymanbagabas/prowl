@@ -3,6 +3,7 @@
 //! size is the only thing we interpolate, so `--merged-limit` is honored).
 
 use crate::github::{Client, Repo};
+use crate::status::{self, Checks};
 use anyhow::Result;
 use serde::Deserialize;
 
@@ -21,6 +22,8 @@ pub const QUEUE_QUERY: &str = r#"query($owner: String!, $name: String!) {
           headCommit {
             statusCheckRollup {
               contexts(first: 40) {
+                checkRunCountsByState { state count }
+                statusContextCountsByState { state count }
                 nodes { ... on CheckRun { startedAt } }
               }
             }
@@ -88,6 +91,12 @@ pub struct QueueRollup {
 
 #[derive(Debug, Deserialize)]
 pub struct QueueContexts {
+    /// GitHub's own per-state check-run counts: exact and unpaginated, unlike
+    /// `nodes` (which is capped and only read for the earliest `startedAt`).
+    #[serde(rename = "checkRunCountsByState", default)]
+    pub check_runs: Vec<StateCount>,
+    #[serde(rename = "statusContextCountsByState", default)]
+    pub status_contexts: Vec<StateCount>,
     pub nodes: Vec<QueueContext>,
 }
 
@@ -105,6 +114,27 @@ impl QueueEntryNode {
     /// speculative commit / no checks), which the BUILD column renders as a
     /// dash. RFC 3339 `...Z` timestamps sort lexically == chronologically, so
     /// `min` is earliest.
+    /// Failing / running / passing checks on the speculative merge commit —
+    /// the queue's own CI semaphore. Empty when the entry has no speculative
+    /// commit or no checks yet.
+    pub fn checks(&self) -> Checks {
+        let mut c = Checks::default();
+        let Some(rollup) = self
+            .head_commit
+            .as_ref()
+            .and_then(|h| h.status_check_rollup.as_ref())
+        else {
+            return c;
+        };
+        for sc in &rollup.contexts.check_runs {
+            c.add(status::check_run_lamp(&sc.state), sc.count);
+        }
+        for sc in &rollup.contexts.status_contexts {
+            c.add(status::status_context_lamp(&sc.state), sc.count);
+        }
+        c
+    }
+
     pub fn build_started_at(&self) -> Option<String> {
         self.head_commit
             .as_ref()?
@@ -168,9 +198,13 @@ pub const MINE_QUERY: &str = r#"query($q: String!) {
   search(type: ISSUE, first: 50, query: $q) {
     nodes {
       ... on PullRequest {
-        number title url state mergeable mergeStateStatus isDraft updatedAt
+        number title url mergeable mergeStateStatus isDraft updatedAt headRefName
         mergeQueueEntry { position state }
-        commits(last: 1) { nodes { commit { checkSuites(first: 50) { totalCount nodes { conclusion checkRuns(first: 1) { totalCount } } } } } }
+        reviewThreads(first: 100) { totalCount nodes { isResolved } }
+        commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 1) {
+          checkRunCountsByState { state count }
+          statusContextCountsByState { state count }
+        } } } } }
       }
     }
   }
@@ -191,7 +225,6 @@ pub struct PrNode {
     pub number: i64,
     pub title: String,
     pub url: String,
-    pub state: Option<String>,
     pub mergeable: Option<String>,
     #[serde(rename = "mergeStateStatus")]
     pub merge_state_status: Option<String>,
@@ -199,8 +232,13 @@ pub struct PrNode {
     pub is_draft: bool,
     #[serde(rename = "updatedAt")]
     pub updated_at: Option<String>,
+    /// The PR's head branch, shown by `--branch`.
+    #[serde(rename = "headRefName")]
+    pub head_ref_name: Option<String>,
     #[serde(rename = "mergeQueueEntry")]
     pub merge_queue_entry: Option<QueueEntry>,
+    #[serde(rename = "reviewThreads")]
+    pub review_threads: ReviewThreads,
     pub commits: Commits,
 }
 
@@ -208,6 +246,30 @@ pub struct PrNode {
 pub struct QueueEntry {
     pub position: i64,
     pub state: String,
+}
+
+/// The PR's review threads. There is no "unresolved" aggregate, so we page the
+/// first 100 and count them; `total_count` tells us whether that page was
+/// complete (a PR with more than 100 threads renders its count as `100+`).
+#[derive(Debug, Deserialize)]
+pub struct ReviewThreads {
+    #[serde(rename = "totalCount")]
+    pub total_count: u64,
+    pub nodes: Vec<ReviewThread>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewThread {
+    #[serde(rename = "isResolved")]
+    pub is_resolved: bool,
+}
+
+impl ReviewThreads {
+    /// (unresolved threads on the fetched page, whether the page was truncated).
+    pub fn unresolved(&self) -> (usize, bool) {
+        let n = self.nodes.iter().filter(|t| !t.is_resolved).count();
+        (n, self.total_count > self.nodes.len() as u64)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,35 +284,54 @@ pub struct CommitNode {
 
 #[derive(Debug, Deserialize)]
 pub struct Commit {
-    #[serde(rename = "checkSuites")]
-    pub check_suites: CheckSuites,
+    /// `null` when the commit has no checks or statuses at all.
+    #[serde(rename = "statusCheckRollup")]
+    pub status_check_rollup: Option<Rollup>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CheckSuites {
-    /// Total suites the server reports, which can exceed the page we fetched.
-    /// Used to detect a truncated page so a dropped suite can't render green.
-    #[serde(rename = "totalCount")]
-    pub total_count: u64,
-    pub nodes: Vec<CheckSuite>,
+pub struct Rollup {
+    pub contexts: RollupCounts,
+}
+
+/// GitHub's own per-state tallies for the rollup. Using the aggregates instead
+/// of paging `contexts` keeps the query cheap and the counts exact — no phantom
+/// zero-run check suites, no truncated page to compensate for.
+#[derive(Debug, Deserialize)]
+pub struct RollupCounts {
+    #[serde(rename = "checkRunCountsByState")]
+    pub check_runs: Vec<StateCount>,
+    #[serde(rename = "statusContextCountsByState")]
+    pub status_contexts: Vec<StateCount>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CheckSuite {
-    pub conclusion: Option<String>,
-    /// `null` when the viewer can't see a suite's runs (e.g. a third-party
-    /// app's checks); treated the same as a zero-run phantom suite.
-    #[serde(rename = "checkRuns")]
-    pub check_runs: Option<CheckRuns>,
+pub struct StateCount {
+    pub state: String,
+    pub count: u64,
 }
 
-/// How many check runs a suite produced. Suites with zero runs are phantom
-/// subscriptions (apps that registered but never ran, or workflows that failed
-/// to start) — GitHub's own status rollup ignores them, and so do we.
-#[derive(Debug, Deserialize)]
-pub struct CheckRuns {
-    #[serde(rename = "totalCount")]
-    pub total_count: u64,
+impl PrNode {
+    /// The failing / running / passing check counts for the PR's last commit.
+    /// Check runs and legacy commit statuses are folded into the same semaphore.
+    pub fn checks(&self) -> Checks {
+        let mut c = Checks::default();
+        let Some(rollup) = self
+            .commits
+            .nodes
+            .first()
+            .and_then(|n| n.commit.status_check_rollup.as_ref())
+        else {
+            return c;
+        };
+        for sc in &rollup.contexts.check_runs {
+            c.add(status::check_run_lamp(&sc.state), sc.count);
+        }
+        for sc in &rollup.contexts.status_contexts {
+            c.add(status::status_context_lamp(&sc.state), sc.count);
+        }
+        c
+    }
 }
 
 pub fn mine_search(repo: &Repo, me: &str) -> String {

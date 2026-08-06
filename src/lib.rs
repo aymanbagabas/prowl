@@ -28,6 +28,7 @@ pub mod auth;
 pub mod cache;
 pub mod changes;
 pub mod cli;
+pub mod clipboard;
 pub mod commits;
 pub mod github;
 pub mod merged;
@@ -139,6 +140,11 @@ fn fetch(
         } else {
             rows
         };
+        let rows = if cli.no_draft {
+            prs::without_drafts(rows)
+        } else {
+            rows
+        };
         Some(rows)
     } else {
         None
@@ -149,6 +155,11 @@ fn fetch(
     let (reviews, reviewed_merged) = if want_reviews {
         let data = model::fetch_reviews(client, repo, me, cli.review_scope.qualifier())?;
         let open = reviews::build_open_rows(data);
+        let open = if cli.no_draft {
+            reviews::without_drafts(open)
+        } else {
+            open
+        };
         let since = timefmt::since_date(&cli.merged_window);
         let merged_nodes =
             model::fetch_reviewed_merged(client, repo, me, &since, cli.merged_limit)?;
@@ -188,7 +199,7 @@ fn paint_section(
     let y = render::paint_header(s, title, accent, Some(&count.to_string()), note, ascii, top);
     let y = match table {
         Some(table) => render::paint_table(s, table, title_w, ascii, y),
-        None => render::paint_dim(s, empty_msg, y),
+        None => render::paint_dim_at(s, empty_msg, render::ROW_INDENT, y),
     };
     y + 1
 }
@@ -222,13 +233,14 @@ fn paint_mine(
     changes: &Changes,
     selected: Option<usize>,
     ascii: bool,
+    branch: bool,
     top: u16,
 ) -> (u16, Option<u16>) {
     let mut prs_table = sections
         .prs
         .as_ref()
         .filter(|r| !r.is_empty())
-        .map(|rows| prs::to_table(rows, ascii, &changes.status_changed));
+        .map(|rows| prs::to_table(rows, ascii, &changes.status_changed, branch));
     let mut queue_table = sections
         .queue
         .as_ref()
@@ -276,7 +288,7 @@ fn paint_mine(
         y = paint_section(
             s,
             "My open PRs",
-            status::LAVENDER,
+            status::GREEN,
             rows.len(),
             None,
             "No open PRs.",
@@ -299,7 +311,7 @@ fn paint_mine(
         y = paint_section(
             s,
             "Merge Queue",
-            status::BLUE,
+            status::PEACH,
             rows.len(),
             eta.as_deref(),
             "No merge queue.",
@@ -432,7 +444,7 @@ fn paint_body(
         y = render::paint_tabs(s, ui.view, ascii, y) + 1;
     }
     match ui.view {
-        View::Mine => paint_mine(s, sections, changes, ui.selected, ascii, y),
+        View::Mine => paint_mine(s, sections, changes, ui.selected, ascii, ui.branch, y),
         View::Reviews => paint_reviews(s, sections, ui.selected, ascii, y),
     }
 }
@@ -448,7 +460,7 @@ fn paint_bottom(
     s: &mut impl TextSurface,
     sections: &Sections,
     ui: &Ui,
-    error: &str,
+    status: &str,
     footer: Option<(&str, bool)>,
     ascii: bool,
     top: u16,
@@ -465,11 +477,11 @@ fn paint_bottom(
         caret = ui.searching.then_some(at);
         painted = true;
     }
-    if !error.is_empty() {
+    if !status.is_empty() {
         if painted {
             y += 1;
         }
-        y = render::paint_dim(s, &format!("error: {error}"), y);
+        y = render::paint_dim(s, status, y);
         painted = true;
     }
     if let Some((interval, refreshing)) = footer {
@@ -497,12 +509,12 @@ fn paint_dashboard(
     sections: &Sections,
     ui: &Ui,
     changes: &Changes,
-    error: &str,
+    status: &str,
     footer: Option<(&str, bool)>,
     ascii: bool,
 ) -> (u16, Option<Position>) {
     let (y, _) = paint_body(s, sections, ui, changes, ascii, footer.is_some(), 0);
-    paint_bottom(s, sections, ui, error, footer, ascii, y)
+    paint_bottom(s, sections, ui, status, footer, ascii, y)
 }
 
 /// A safe upper bound on the dashboard body's height, used to size a surface
@@ -565,7 +577,7 @@ fn render_dashboard(
     sections: &Sections,
     ui: &Ui,
     changes: &Changes,
-    error: &str,
+    status: &str,
     footer: Option<(&str, bool)>,
     ascii: bool,
     pinned: bool,
@@ -581,7 +593,7 @@ fn render_dashboard(
         let mut body = TextBuffer::new(w, height_bound(sections, ui).max(1));
         let (body_h, sel) = paint_body(&mut body, sections, ui, changes, ascii, true, 0);
         let mut bottom = TextBuffer::new(w, bottom_bound(ui).max(1));
-        let (bottom_h, at) = paint_bottom(&mut bottom, sections, ui, error, footer, ascii, 0);
+        let (bottom_h, at) = paint_bottom(&mut bottom, sections, ui, status, footer, ascii, 0);
 
         screen.clear();
         let top = render::compose(screen, &mut body, body_h, &mut bottom, bottom_h, rows, sel);
@@ -593,7 +605,7 @@ fn render_dashboard(
         // actually used so the surface is exactly the dashboard's line count.
         screen.resize((w, (height_bound(sections, ui) + bottom_bound(ui)).max(1)));
         screen.clear();
-        let (used, caret) = paint_dashboard(screen, sections, ui, changes, error, footer, ascii);
+        let (used, caret) = paint_dashboard(screen, sections, ui, changes, status, footer, ascii);
         screen.resize((w, used.max(1)));
         caret
     };
@@ -758,7 +770,12 @@ fn paint_commits(
     top: u16,
 ) -> (u16, Option<u16>) {
     if !stats.available {
-        return (render::paint_dim(s, "Commit stats unavailable.", top), None);
+        // The shipments rows lead with a 2-column gutter, not a table's marker
+        // and glyph cells, so the placeholder follows that instead.
+        return (
+            render::paint_dim_at(s, "Commit stats unavailable.", 2, top),
+            None,
+        );
     }
     let count = |c: &commits::Count| format!("{}{}", c.mine, if c.capped { "+" } else { "" });
 
@@ -776,7 +793,7 @@ fn paint_commits(
     let mut y = render::paint_header(
         s,
         "My Shipments",
-        status::TEAL,
+        status::BLUE,
         Some(&total),
         None,
         ascii,
@@ -880,6 +897,10 @@ enum Action {
     SwitchView,
     /// `Enter`: open the selected row in the browser.
     Open,
+    /// `y`: copy the selected row's link.
+    Copy,
+    /// `Y`: copy every link in the section the cursor is in.
+    CopySection,
     /// `/`: open the search prompt.
     Search,
     /// `Esc`: clear an applied filter, or quit when there is none.
@@ -930,6 +951,10 @@ fn classify(ev: &Event) -> Action {
                 Action::SwitchView
             } else if k.matches("enter") {
                 Action::Open
+            } else if k.matches("y") {
+                Action::Copy
+            } else if k.matches("Y") {
+                Action::CopySection
             } else if k.matches("/") {
                 Action::Search
             } else if k.matches("ctrl+z") {
@@ -1005,6 +1030,8 @@ struct Ui {
     search: String,
     /// Whether the search prompt is open and capturing text.
     searching: bool,
+    /// `--branch`: show each open PR's head branch.
+    branch: bool,
 }
 
 impl Ui {
@@ -1017,6 +1044,7 @@ impl Ui {
             selected: None,
             search: String::new(),
             searching: false,
+            branch: cli.branch,
         }
     }
 
@@ -1119,7 +1147,10 @@ struct App<'a> {
     ui: Ui,
     /// The most recent short error (empty unless a refresh or an open failed),
     /// kept so a `?` toggle or a repaint keeps it on screen.
-    last_error: String,
+    /// The dim trailing line above the footer: a refresh/open error, or a
+    /// transient note (a clipboard copy). Worded in full, and cleared by the
+    /// next refresh.
+    last_status: String,
     /// Whether a fetch is in flight, so the footer can say `r refreshing`.
     refreshing: bool,
     /// Whether the bell is armed. The first refresh after a cached start is
@@ -1167,8 +1198,9 @@ impl<'a> App<'a> {
                 selected: None,
                 search: String::new(),
                 searching: false,
+                branch: cli.branch,
             },
-            last_error: String::new(),
+            last_status: String::new(),
             refreshing: false,
             armed: false,
             in_alt: false,
@@ -1231,7 +1263,7 @@ impl<'a> App<'a> {
             sections,
             &self.ui,
             changes,
-            &self.last_error,
+            &self.last_status,
             Some((self.eta.as_str(), self.refreshing)),
             self.cli.ascii,
             // Pinning lays the frame out for a screen of a known height, which
@@ -1408,6 +1440,14 @@ impl<'a> App<'a> {
                 self.open_selected()?;
                 Flow::Continue
             }
+            Action::Copy => {
+                self.copy_selected()?;
+                Flow::Continue
+            }
+            Action::CopySection => {
+                self.copy_section()?;
+                Flow::Continue
+            }
             Action::Move(m) => {
                 let len = self.target_count();
                 let next = nav::moved(m, self.ui.selected, len, self.half_page());
@@ -1479,6 +1519,61 @@ impl<'a> App<'a> {
             .map_or(10, |s| usize::from(s.height / 2).max(1))
     }
 
+    /// `y`: copy the selected row's link. A no-op without a selection or data.
+    fn copy_selected(&mut self) -> Result<()> {
+        let Some(sel) = self.ui.selected else {
+            return Ok(());
+        };
+        let url = self.last_good.as_ref().and_then(|good| {
+            nav::targets(self.ui.view, good, &self.ui.search)
+                .get(sel)
+                .map(|u| (*u).to_string())
+        });
+        match url {
+            Some(url) => self.copy(&url, 1),
+            None => Ok(()),
+        }
+    }
+
+    /// `Y`: copy every link of the section the cursor is in, as a markdown list.
+    /// With no selection that's the first non-empty section, matching where a
+    /// movement key would enter. Honors the active search filter, like `targets`.
+    fn copy_section(&mut self) -> Result<()> {
+        let Some(good) = &self.last_good else {
+            return Ok(());
+        };
+        let urls: Vec<String> = nav::section_at(
+            self.ui.view,
+            good,
+            &self.ui.search,
+            self.ui.selected.unwrap_or_default(),
+        )
+        .iter()
+        .map(|u| (*u).to_string())
+        .collect();
+        if urls.is_empty() {
+            return Ok(());
+        }
+        let n = urls.len();
+        let list = urls
+            .iter()
+            .map(|u| format!("- {u}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.copy(&list, n)
+    }
+
+    /// Hand `text` (`n` links) to the terminal's clipboard and report it on the
+    /// trailing status line, which the next refresh clears.
+    fn copy(&mut self, text: &str, n: usize) -> Result<()> {
+        let plural = if n == 1 { "" } else { "s" };
+        self.last_status = match clipboard::copy(text) {
+            Ok(()) => format!("copied {n} link{plural}"),
+            Err(e) => format!("error: copy failed: {e}"),
+        };
+        self.repaint_last()
+    }
+
     /// Open the selected row's URL in the browser. A failure becomes the dim
     /// error line; a no-op (no selection, no data) leaves the screen as is.
     fn open_selected(&mut self) -> Result<()> {
@@ -1492,7 +1587,7 @@ impl<'a> App<'a> {
         });
         let Some(url) = url else { return Ok(()) };
         if let Err(e) = open::url(&url) {
-            self.last_error = format!("open failed: {e}");
+            self.last_status = format!("error: open failed: {e}");
             self.repaint_last()?;
         }
         Ok(())
@@ -1509,7 +1604,7 @@ impl<'a> App<'a> {
             .unwrap_or_default();
         let bell = changes.any();
 
-        self.last_error.clear();
+        self.last_status.clear();
         self.prev = Some(tracker);
         self.last_good = Some(sections);
         // The refreshed (and filtered) list may be shorter than before; keep the
@@ -1533,7 +1628,7 @@ impl<'a> App<'a> {
     /// Render a failed fetch: keep the last good data, add a dim error line, and
     /// do not ring. With no data yet, just the error line and footer show.
     fn show_error(&mut self, e: anyhow::Error) -> Result<()> {
-        self.last_error = short_error(&e);
+        self.last_status = format!("error: {}", short_error(&e));
         self.enter_alt()?;
         self.redraw(&Changes::default())
     }
@@ -1577,6 +1672,7 @@ mod tests {
             selected: None,
             search: String::new(),
             searching: false,
+            branch: false,
         }
     }
 
@@ -1603,6 +1699,18 @@ mod tests {
         after("My open PRs (0)", "No open PRs.");
         after("Merge Queue (0)", "No merge queue.");
         after("My merged PRs (0)", "No recent merged PRs.");
+
+        // ...indented to the row gutter, so it lines up with a section's rows.
+        for msg in ["No open PRs.", "No merge queue.", "No recent merged PRs."] {
+            let line = body
+                .lines()
+                .find(|l| l.contains(msg))
+                .expect("placeholder line");
+            assert_eq!(
+                line,
+                format!("{}{msg}", " ".repeat(render::ROW_INDENT as usize))
+            );
+        }
     }
 
     #[test]
@@ -1637,10 +1745,13 @@ mod tests {
             number: n,
             is_draft: false,
             title: format!("pr {n}"),
+            branch: format!("b/{n}"),
+            mergeable: crate::status::Mergeable::Ready,
             status: None,
-            merge_state: None,
+            checks: crate::status::Checks::default(),
+            unresolved: 0,
+            unresolved_capped: false,
             queue: None,
-            fail: 0,
             url: format!("https://pr/{n}"),
             updated_at: None,
         };

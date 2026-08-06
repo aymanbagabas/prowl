@@ -14,6 +14,8 @@ Keys (while watching):
   g / G            jump to the first / last row
   Ctrl-D / Ctrl-U  move the selection half a page
   Enter            open the selected PR or release in your browser
+  y                copy the selected row's link to the clipboard
+  Y                copy every link in the selected section, as a markdown list
   /                filter by number / title / author / release tag
   Esc              clear the filter
   r                refresh now
@@ -74,6 +76,14 @@ pub struct Cli {
     /// request you directly, or also those requesting a team you belong to.
     #[arg(long, value_enum, default_value_t = ReviewScope::All, value_name = "SCOPE")]
     pub review_scope: ReviewScope,
+
+    /// Show each open PR's head branch in an extra BRANCH column.
+    #[arg(long)]
+    pub branch: bool,
+
+    /// Hide draft pull requests.
+    #[arg(long)]
+    pub no_draft: bool,
 
     /// Hide the help legend in one-shot/piped output (in the watch view it
     /// starts hidden and is toggled with `?`).
