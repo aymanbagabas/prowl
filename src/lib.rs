@@ -53,18 +53,20 @@ use std::io::{IsTerminal, Write};
 use unicode_width::UnicodeWidthStr;
 
 /// A fetched snapshot of every enabled section (`None` = section disabled).
+/// Public only so the offline fixture tests and the `demo` example (which
+/// renders fake data for the README screenshot) can build one.
 #[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct Sections {
-    merged: Option<Vec<merged::MergedRow>>,
-    queue: Option<Vec<queue::QueueRow>>,
+pub struct Sections {
+    pub merged: Option<Vec<merged::MergedRow>>,
+    pub queue: Option<Vec<queue::QueueRow>>,
     /// Queue-level estimate: seconds until a newly added entry would merge.
-    queue_next_eta: Option<i64>,
-    prs: Option<Vec<prs::PrRow>>,
-    commits: Option<commits::CommitStats>,
+    pub queue_next_eta: Option<i64>,
+    pub prs: Option<Vec<prs::PrRow>>,
+    pub commits: Option<commits::CommitStats>,
     /// Reviews view: open PRs awaiting / under my review.
-    reviews: Option<Vec<reviews::ReviewRow>>,
+    pub reviews: Option<Vec<reviews::ReviewRow>>,
     /// Reviews view: merged PRs I reviewed.
-    reviewed_merged: Option<Vec<reviews::ReviewedMergedRow>>,
+    pub reviewed_merged: Option<Vec<reviews::ReviewedMergedRow>>,
 }
 
 /// Fetch the sections for the requested views. `want_mine` covers the Mine view
@@ -194,7 +196,7 @@ fn section(
 /// Rows that changed since the previous refresh (per `changes`) are flagged with
 /// a leading marker. The footer and help legend are rendered separately (below
 /// the body) by `bottom`.
-fn render_body(
+pub fn render_body(
     s: &Sections,
     cli: &Cli,
     view: View,
@@ -616,7 +618,7 @@ fn help_block(cli: &Cli, view: View, show_help: bool, styled: bool) -> String {
 /// only) the key-hint footer, then the help legend last. Any part may be empty
 /// to omit it; present parts are separated by a single blank line. The render
 /// body already ends with a blank line, so the first part is not prefixed.
-fn bottom(search: &str, status: &str, footer: &str, help: &str) -> String {
+pub fn bottom(search: &str, status: &str, footer: &str, help: &str) -> String {
     let mut out = String::new();
     for part in [search, status, footer, help] {
         if part.is_empty() {

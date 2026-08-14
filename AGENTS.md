@@ -336,6 +336,21 @@ findings fail CI.
 CI (`.github/workflows/build.yml`) runs fmt/clippy/build/test (the `build` job)
 and `cargo audit` for dependency advisories (the `audit` job) on push and PRs.
 
+## The README screenshot
+
+`task screenshot` regenerates it. `examples/demo.rs` builds a fake `Sections`
+(made-up repo, PRs and authors; timestamps relative to now) and prints it
+through the real `render_body` + `render::footer`/`help`, so the shot can't
+drift from the layout — which is why `Sections`, `render_body` and `bottom` are
+`pub`, same as everything else the offline tests reach. `demo.tape` shoots it
+with [vhs](https://github.com/charmbracelet/vhs) (Nerd Font, Catppuccin Mocha;
+the trailing `Sleep` is required or vhs exits before writing the file), and the
+task uploads `demo.png` to GitHub's CDN and rewrites the `<img>` URL in
+`README.md`. `demo.png` is gitignored — no binary in the repo. An uploaded asset
+only goes public once its URL appears in a comment/issue/PR body (a commit that
+references it does *not* count), so the task posts and deletes a commit comment,
+then polls the URL anonymously until it answers 200.
+
 ## Releases
 
 `task release` cuts one: `svu next` picks the version, writes it to
