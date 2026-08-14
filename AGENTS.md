@@ -338,6 +338,10 @@ and `cargo audit` for dependency advisories (the `audit` job) on push and PRs.
 
 ## Releases
 
+`task release` cuts one: `svu next` picks the version, writes it to
+`Cargo.toml`, refreshes `Cargo.lock`, commits (`chore(release): vX.Y.Z`), tags,
+pushes, and watches the workflow run. It only runs from a clean `main`.
+
 Tag `vX.Y.Z` → `.github/workflows/release.yml` runs **GoReleaser Pro**
 (`.goreleaser.yaml`). The config `includes:` shared snippets from
 [`caarlos0/goreleaserfiles`](https://github.com/caarlos0/goreleaserfiles)

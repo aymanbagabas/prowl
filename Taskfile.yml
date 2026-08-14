@@ -1,0 +1,71 @@
+# https://taskfile.dev
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+version: "3"
+
+tasks:
+  build:
+    desc: Build the binary
+    cmds:
+      - cargo build
+
+  test:
+    desc: Run the tests
+    cmds:
+      - cargo test
+
+  lint:
+    desc: Lint with clippy
+    cmds:
+      - cargo clippy --all-targets -- -D warnings
+
+  fmt:
+    desc: Format the code
+    cmds:
+      - cargo fmt --all
+
+  ci:
+    desc: Run everything CI runs
+    cmds:
+      - cargo fmt --all --check
+      - task: lint
+      - task: build
+      - task: test
+
+  default:
+    cmds:
+      - task: ci
+
+  release:
+    desc: Bump the version, tag it, and push
+    vars:
+      NEXT:
+        sh: svu next
+      VERSION: '{{trimPrefix "v" .NEXT}}'
+    prompt: "This will release {{.NEXT}}. Continue?"
+    preconditions:
+      - sh: '[ $(git symbolic-ref --short HEAD) = "main" ]'
+        msg: Not on the main branch
+      - sh: "[ $(git status --porcelain=2 | wc -l) = 0 ]"
+        msg: Git is dirty
+    cmds:
+      - sed -i.bak 's/^version = .*/version = "{{.VERSION}}"/' Cargo.toml
+      - rm -f Cargo.toml.bak
+      - cargo update --workspace --offline
+      - git add Cargo.toml Cargo.lock
+      - 'git commit -s -m "chore(release): {{.NEXT}}"'
+      - git tag -m {{.NEXT}} {{.NEXT}}
+      - git push origin main --follow-tags
+      # Give GitHub a moment to register the run, otherwise we'd watch the
+      # previous one.
+      - sleep 5
+      - task: release:watch
+
+  release:watch:
+    desc: Watch the current release workflow run
+    vars:
+      RUN_ID:
+        sh: gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[].databaseId'
+    cmds:
+      - gh run watch {{.RUN_ID}}

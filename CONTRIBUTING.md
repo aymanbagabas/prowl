@@ -19,6 +19,7 @@ cargo clippy --all-targets -- -D warnings
 
 All four must be green before you open a PR: the build is warning-free,
 clippy is clean with `-D warnings`, and the tests pass without network access.
+`task ci` runs all of them.
 
 ## Conventions
 
