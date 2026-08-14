@@ -1,0 +1,110 @@
+# https://taskfile.dev
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+version: "3"
+
+tasks:
+  build:
+    desc: Build the binary
+    cmds:
+      - cargo build
+
+  test:
+    desc: Run the tests
+    cmds:
+      - cargo test
+
+  lint:
+    desc: Lint with clippy
+    cmds:
+      - cargo clippy --all-targets -- -D warnings
+
+  fmt:
+    desc: Format the code
+    cmds:
+      - cargo fmt --all
+
+  ci:
+    desc: Run everything CI runs
+    cmds:
+      - cargo fmt --all --check
+      - task: lint
+      - task: build
+      - task: test
+
+  screenshot:
+    desc: Regenerate the README screenshot from fake data, upload it, and link it
+    preconditions:
+      - sh: command -v vhs
+        msg: vhs is not installed (brew install vhs)
+    cmds:
+      - cargo build --example demo
+      - rm -f demo.png
+      # vhs has been seen to exit 0 without writing the screenshot, so check.
+      - vhs demo.tape
+      - test -f demo.png
+      - |
+        url=$(curl --fail-with-body -sS -X POST \
+          https://uploads.github.com/user-attachments/assets \
+          --url-query "name=demo.png" \
+          --url-query "content_type=image/png" \
+          --url-query "repository_id=$(gh api 'repos/{owner}/{repo}' --jq .id)" \
+          -H "Content-Type: application/octet-stream" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          -H "Authorization: token $(gh auth token)" \
+          --data-binary @demo.png | jq -r .url)
+        case "$url" in https://*) ;; *) echo "upload failed: $url" >&2; exit 1;; esac
+        # An uploaded asset stays private until its URL appears in a comment,
+        # issue or PR body — a commit referencing it does not count, so linking
+        # it in the README is not enough. Posting it in a commit comment
+        # publishes it for good; deleting the comment does not take it back.
+        comment=$(gh api "repos/{owner}/{repo}/commits/$(gh api 'repos/{owner}/{repo}/commits' --jq '.[0].sha')/comments" \
+          -f body="![demo]($url)" --jq .id)
+        gh api -X DELETE "repos/{owner}/{repo}/comments/$comment" --silent
+        for _ in $(seq 30); do
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -L "$url")
+          [ "$code" = 200 ] && break
+          sleep 5
+        done
+        [ "$code" = 200 ] || { echo "$url is not public ($code)" >&2; exit 1; }
+        sed -i.bak "s|https://github.com/user-attachments/assets/[0-9a-f-]*|$url|" README.md
+        rm -f README.md.bak
+        echo "README.md now points at $url"
+
+  default:
+    cmds:
+      - task: ci
+
+  release:
+    desc: Bump the version, tag it, and push
+    vars:
+      NEXT:
+        sh: svu next
+      VERSION: '{{trimPrefix "v" .NEXT}}'
+    prompt: "This will release {{.NEXT}}. Continue?"
+    preconditions:
+      - sh: '[ $(git symbolic-ref --short HEAD) = "main" ]'
+        msg: Not on the main branch
+      - sh: "[ $(git status --porcelain=2 | wc -l) = 0 ]"
+        msg: Git is dirty
+    cmds:
+      - sed -i.bak 's/^version = .*/version = "{{.VERSION}}"/' Cargo.toml
+      - rm -f Cargo.toml.bak
+      - cargo update --workspace --offline
+      - git add Cargo.toml Cargo.lock
+      - 'git commit -s -m "chore(release): {{.NEXT}}"'
+      - git tag -m {{.NEXT}} {{.NEXT}}
+      - git push origin main --follow-tags
+      # Give GitHub a moment to register the run, otherwise we'd watch the
+      # previous one.
+      - sleep 5
+      - task: release:watch
+
+  release:watch:
+    desc: Watch the current release workflow run
+    vars:
+      RUN_ID:
+        sh: gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[].databaseId'
+    cmds:
+      - gh run watch {{.RUN_ID}}

@@ -15,6 +15,7 @@ pub const BLUE: Color = Color::rgb(137, 180, 250); // #89b4fa
 pub const LAVENDER: Color = Color::rgb(180, 190, 254); // #b4befe
 pub const PINK: Color = Color::rgb(245, 194, 231); // #f5c2e7 — "changed since last refresh" marker
 pub const OVERLAY: Color = Color::rgb(147, 153, 178); // #9399b2 — muted accent (help legend)
+pub const SURFACE: Color = Color::rgb(69, 71, 90); // #45475a — selected-row background
 
 /// Coarse CI/merge state of an open PR. It is no longer rendered directly (the
 /// row shows a mergeability glyph plus a check-run semaphore); it exists as the
@@ -168,7 +169,6 @@ pub fn review_meaning(s: ReviewState) -> &'static str {
     }
 }
 
-/// A truecolor foreground style.
 /// A foreground style for a palette color.
 pub fn fg(color: Color) -> Style {
     Style::new().fg(color)

@@ -59,18 +59,20 @@ use uncurses::terminal::{Stdin, Stdout, Terminal};
 use uncurses::text::{Encode, TextSurface};
 
 /// A fetched snapshot of every enabled section (`None` = section disabled).
+/// Public only so the offline fixture tests and the `demo` example (which
+/// renders fake data for the README screenshot) can build one.
 #[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct Sections {
-    merged: Option<Vec<merged::MergedRow>>,
-    queue: Option<Vec<queue::QueueRow>>,
+pub struct Sections {
+    pub merged: Option<Vec<merged::MergedRow>>,
+    pub queue: Option<Vec<queue::QueueRow>>,
     /// Queue-level estimate: seconds until a newly added entry would merge.
-    queue_next_eta: Option<i64>,
-    prs: Option<Vec<prs::PrRow>>,
-    commits: Option<commits::CommitStats>,
+    pub queue_next_eta: Option<i64>,
+    pub prs: Option<Vec<prs::PrRow>>,
+    pub commits: Option<commits::CommitStats>,
     /// Reviews view: open PRs awaiting / under my review.
-    reviews: Option<Vec<reviews::ReviewRow>>,
+    pub reviews: Option<Vec<reviews::ReviewRow>>,
     /// Reviews view: merged PRs I reviewed.
-    reviewed_merged: Option<Vec<reviews::ReviewedMergedRow>>,
+    pub reviewed_merged: Option<Vec<reviews::ReviewedMergedRow>>,
 }
 
 impl Sections {
@@ -204,16 +206,11 @@ fn paint_section(
     y + 1
 }
 
-/// Overwrite the leading marker cell of `table`'s `local`-th row with the
-/// navigation caret, returning whether there was such a row to mark.
-fn place_caret(table: Option<&mut render::Table>, local: usize, ascii: bool) -> bool {
-    if let Some(row) = table.and_then(|t| t.rows.get_mut(local))
-        && let Some(first) = row.first_mut()
-    {
-        *first = render::select_marker(ascii);
-        return true;
-    }
-    false
+/// Whether `table` has a `local`-th row — i.e. whether the selection landed on
+/// this section. Nothing is marked on the row itself: `paint_body` highlights
+/// the screen row once the whole body is painted.
+fn selects_row(table: Option<&render::Table>, local: usize) -> bool {
+    table.is_some_and(|t| t.rows.len() > local)
 }
 
 /// The screen row of a table's `local`-th data row, in a section painted from
@@ -236,42 +233,42 @@ fn paint_mine(
     branch: bool,
     top: u16,
 ) -> (u16, Option<u16>) {
-    let mut prs_table = sections
+    let prs_table = sections
         .prs
         .as_ref()
         .filter(|r| !r.is_empty())
         .map(|rows| prs::to_table(rows, ascii, &changes.status_changed, branch));
-    let mut queue_table = sections
+    let queue_table = sections
         .queue
         .as_ref()
         .filter(|r| !r.is_empty())
         .map(|rows| queue::to_table(rows, ascii));
-    let mut merged_table = sections
+    let merged_table = sections
         .merged
         .as_ref()
         .filter(|r| !r.is_empty())
         .map(|rows| merged::to_table(rows, ascii, &changes.newly_merged));
 
-    // Place the navigation caret: map the global selection onto the section it
-    // falls in. Every PR/queue/merged row is navigable, so the local index is
-    // the offset past the earlier sections; any remainder indexes the shipments'
+    // Locate the selection: map the global selection onto the section it falls
+    // in. Every PR/queue/merged row is navigable, so the local index is the
+    // offset past the earlier sections; any remainder indexes the shipments'
     // navigable rows (handled by `paint_commits`).
     let mut ship_sel = None;
-    // Which section's table got the caret, and at which of its rows — the row it
-    // ends up on isn't known until that section is painted.
+    // Which section's table holds the selection, and at which of its rows — the
+    // screen row it ends up on isn't known until that section is painted.
     let (mut prs_sel, mut queue_sel, mut merged_sel) = (None, None, None);
     if let Some(sel) = selected {
         let np = sections.prs.as_ref().map_or(0, Vec::len);
         let nq = sections.queue.as_ref().map_or(0, Vec::len);
         let nm = sections.merged.as_ref().map_or(0, Vec::len);
         if sel < np {
-            prs_sel = place_caret(prs_table.as_mut(), sel, ascii).then_some(sel);
+            prs_sel = selects_row(prs_table.as_ref(), sel).then_some(sel);
         } else if sel < np + nq {
             let local = sel - np;
-            queue_sel = place_caret(queue_table.as_mut(), local, ascii).then_some(local);
+            queue_sel = selects_row(queue_table.as_ref(), local).then_some(local);
         } else if sel < np + nq + nm {
             let local = sel - np - nq;
-            merged_sel = place_caret(merged_table.as_mut(), local, ascii).then_some(local);
+            merged_sel = selects_row(merged_table.as_ref(), local).then_some(local);
         } else {
             ship_sel = Some(sel - np - nq - nm);
         }
@@ -354,12 +351,12 @@ fn paint_reviews(
     ascii: bool,
     top: u16,
 ) -> (u16, Option<u16>) {
-    let mut open_table = sections
+    let open_table = sections
         .reviews
         .as_ref()
         .filter(|r| !r.is_empty())
         .map(|rows| reviews::open_to_table(rows, ascii));
-    let mut merged_table = sections
+    let merged_table = sections
         .reviewed_merged
         .as_ref()
         .filter(|r| !r.is_empty())
@@ -371,10 +368,10 @@ fn paint_reviews(
     if let Some(sel) = selected {
         let nr = sections.reviews.as_ref().map_or(0, Vec::len);
         if sel < nr {
-            open_sel = place_caret(open_table.as_mut(), sel, ascii).then_some(sel);
+            open_sel = selects_row(open_table.as_ref(), sel).then_some(sel);
         } else {
             let local = sel - nr;
-            merged_sel = place_caret(merged_table.as_mut(), local, ascii).then_some(local);
+            merged_sel = selects_row(merged_table.as_ref(), local).then_some(local);
         }
     }
 
@@ -443,16 +440,24 @@ fn paint_body(
     if tabs {
         y = render::paint_tabs(s, ui.view, ascii, y) + 1;
     }
-    match ui.view {
+    let (y, caret) = match ui.view {
         View::Mine => paint_mine(s, sections, changes, ui.selected, ascii, ui.branch, y),
         View::Reviews => paint_reviews(s, sections, ui.selected, ascii, y),
+    };
+    // Highlight the selected row once the whole body is painted, so the bar
+    // spans the content and covers the hand-laid-out shipments section too.
+    if let Some(row) = caret {
+        render::highlight_row(s, row);
     }
+    (y, caret)
 }
 
-/// Paint the dashboard's bottom block onto `s` from row `top`: the optional
-/// search prompt, `error:` line, footer, and help legend — each separated from
-/// the previous part by one blank row (the body's trailing blank serves as the
-/// first). While watching this block is pinned to the last rows of the screen.
+/// Paint the dashboard's bottom block onto `s` from row `top`: the help legend,
+/// the optional search prompt, `error:` line, then the footer last — the legend
+/// explains the keys the footer lists, so it reads above them rather than
+/// pushing them up. Each part is separated from the previous by one blank row
+/// (the body's trailing blank serves as the first). While watching this block is
+/// pinned to the last rows of the screen.
 ///
 /// Returns the next free row and, while the search prompt is capturing, where
 /// the terminal's own cursor should rest (relative to `s`).
@@ -468,7 +473,14 @@ fn paint_bottom(
     let mut y = top;
     let mut painted = false;
     let mut caret = None;
+    if ui.show_help {
+        y = render::paint_help(s, ui.view, ascii, y);
+        painted = true;
+    }
     if !ui.search.is_empty() || ui.searching {
+        if painted {
+            y += 1;
+        }
         let matches = nav::targets(ui.view, sections, &ui.search).len();
         let (next, at) = render::paint_search_prompt(s, &ui.search, matches, ascii, y);
         y = next;
@@ -489,13 +501,6 @@ fn paint_bottom(
             y += 1;
         }
         y = render::paint_footer(s, interval, refreshing, ascii, y);
-        painted = true;
-    }
-    if ui.show_help {
-        if painted {
-            y += 1;
-        }
-        y = render::paint_help(s, ui.view, ascii, y);
     }
     (y, caret)
 }
@@ -596,9 +601,13 @@ fn render_dashboard(
         let (bottom_h, at) = paint_bottom(&mut bottom, sections, ui, status, footer, ascii, 0);
 
         screen.clear();
-        let top = render::compose(screen, &mut body, body_h, &mut bottom, bottom_h, rows, sel);
-        // The prompt's caret is relative to the bottom block, which just moved.
-        at.map(|p| Position::new(p.x, top.saturating_add(p.y)))
+        let (top, cut) =
+            render::compose(screen, &mut body, body_h, &mut bottom, bottom_h, rows, sel);
+        // The prompt's caret is relative to the bottom block, which just moved —
+        // and whose head may have been cut off on a short terminal, taking the
+        // prompt with it.
+        at.filter(|p| p.y >= cut)
+            .map(|p| Position::new(p.x, top + (p.y - cut)))
     } else {
         let w = screen.width().max(1);
         // Grow tall enough to paint everything, paint, then shrink to the height
@@ -619,6 +628,32 @@ fn render_dashboard(
     Ok(caret)
 }
 
+/// Paint a whole dashboard onto an offscreen [`TextBuffer`] sized to its content
+/// and encode it, `profile` deciding how much styling survives (`Disabled` drops
+/// SGR and hyperlinks, so piped output is plain). What `--once` writes to the
+/// terminal, and what the `demo` example renders fake data through, so the
+/// README screenshot can't drift from the real layout.
+pub fn render_to_string(
+    sections: &Sections,
+    ui: &Ui,
+    changes: &Changes,
+    footer: Option<(&str, bool)>,
+    ascii: bool,
+    profile: Profile,
+) -> String {
+    let w = render::MAX_WIDTH as u16;
+    let mut canvas = TextBuffer::new(w, height_bound(sections, ui) + bottom_bound(ui));
+    // One-shot output never searches, so there is no caret to place.
+    let (used, _) = paint_dashboard(&mut canvas, sections, ui, changes, "", footer, ascii);
+    canvas.resize(w, used.max(1));
+
+    let mut out = Vec::new();
+    canvas
+        .encode_with(&mut out, profile)
+        .expect("encoding to a Vec cannot fail");
+    String::from_utf8(out).expect("uncurses encodes valid UTF-8")
+}
+
 /// Render the dashboard once into an offscreen [`TextBuffer`] sized to its content,
 /// then encode it to the terminal's output with the **detected** color profile
 /// (plain when piped) and exit. Used by `--once` and non-TTY output.
@@ -634,18 +669,13 @@ fn render_once(
     // One-shot output has no interaction: no tabs, no selection, no search; the
     // help legend follows `--no-help` instead of the `?` toggle.
     let ui = Ui::once(cli);
-
-    let w = render::MAX_WIDTH as u16;
-    let mut canvas = TextBuffer::new(w, height_bound(sections, &ui) + bottom_bound(&ui));
-    // One-shot output never searches, so there is no caret to place.
-    let (used, _) = paint_dashboard(&mut canvas, sections, &ui, changes, "", footer, ascii);
-    canvas.resize(w, used.max(1));
+    let painted = render_to_string(sections, &ui, changes, footer, ascii, profile);
 
     // A closed downstream pipe (`prowl --once | head`) is a clean exit, not an
     // error worth printing.
     let mut out = terminal.output();
-    let write = canvas
-        .encode_with(&mut out, profile)
+    let write = out
+        .write_all(painted.as_bytes())
         .and_then(|()| out.write_all(b"\n"))
         .and_then(|()| out.flush());
     match write {
@@ -853,11 +883,9 @@ fn paint_commits(
             Some(url) => render::Cell::link_styled(label.clone(), url.clone(), style),
             None => render::Cell::styled(label.clone(), style),
         };
-        // A 2-column leading gutter holds the caret on the selected row, so the
-        // labels stay aligned with or without one.
+        // A 2-column leading gutter keeps the labels aligned; the selected row
+        // is reported here and highlighted by `paint_body` once the body is done.
         if Some(i) == sel_row {
-            let marker = render::select_marker(ascii);
-            s.set_str((0, y), &marker.text, &marker.style);
             caret = Some(y);
         }
         let x = (2 + label_w - s.str_width(label) as usize) as u16;
@@ -1016,28 +1044,30 @@ enum Flow {
 }
 
 /// The interactive dashboard state threaded through painting and mutated on each
-/// keypress. One-shot output uses the inert [`Ui::once`] form.
-struct Ui {
+/// keypress. One-shot output uses the inert [`Ui::once`] form. Public only so the
+/// `demo` example (which renders fake data for the README screenshot) can build
+/// one.
+pub struct Ui {
     /// Active view; starts at `--view`, toggled with Tab.
-    view: View,
+    pub view: View,
     /// Whether the `?` help legend is shown (starts hidden while watching).
-    show_help: bool,
+    pub show_help: bool,
     /// Navigation cursor into the active view's (filtered) rows — lazy (`None`
     /// until the user moves it), reset when switching views or changing the
     /// search, clamped when a refresh shrinks the list.
-    selected: Option<usize>,
+    pub selected: Option<usize>,
     /// The active search query; empty means no filter is applied.
-    search: String,
+    pub search: String,
     /// Whether the search prompt is open and capturing text.
-    searching: bool,
+    pub searching: bool,
     /// `--branch`: show each open PR's head branch.
-    branch: bool,
+    pub branch: bool,
 }
 
 impl Ui {
     /// The non-interactive form used by `--once` / piped output: the `--view`
     /// sections, the help legend per `--no-help`, no selection and no search.
-    fn once(cli: &Cli) -> Ui {
+    pub fn once(cli: &Cli) -> Ui {
         Ui {
             view: cli.view,
             show_help: !cli.no_help,
@@ -1646,6 +1676,7 @@ impl<'a> App<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uncurses::buffer::Surface;
     use uncurses::text::Encode;
 
     /// Paint a dashboard onto an offscreen buffer and read it back as plain text.
@@ -1740,7 +1771,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_places_the_caret_on_the_chosen_row() {
+    fn selection_highlights_the_chosen_row() {
         let pr = |n: i64| prs::PrRow {
             number: n,
             is_draft: false,
@@ -1759,21 +1790,48 @@ mod tests {
             prs: Some(vec![pr(1), pr(2)]),
             ..Sections::EMPTY
         };
-        // No selection -> no caret anywhere (the glanceable default).
-        let caret = '>';
-        let none = body(&sections, &ui(View::Mine));
-        assert!(!none.contains(caret));
-        // Selecting the second row draws exactly one caret, on that row.
-        let sel = body(
-            &sections,
-            &Ui {
-                selected: Some(1),
-                ..ui(View::Mine)
-            },
-        );
-        assert_eq!(sel.matches(caret).count(), 1);
-        let caret_at = sel.find(caret).unwrap();
-        assert!(caret_at < sel.find("#2").unwrap());
-        assert!(caret_at > sel.find("#1").unwrap());
+
+        // The rows carrying the selection background, and their text.
+        let highlighted = |ui: &Ui| -> Vec<String> {
+            let w = render::MAX_WIDTH as u16;
+            let mut canvas = TextBuffer::new(w, 64);
+            paint_dashboard(
+                &mut canvas,
+                &sections,
+                ui,
+                &Changes::default(),
+                "",
+                None,
+                true,
+            );
+            let text: Vec<String> = canvas
+                .display_with(Profile::Disabled)
+                .to_string()
+                .lines()
+                .map(str::to_string)
+                .collect();
+            (0..64u16)
+                .filter(|&y| {
+                    (0..w).any(|x| {
+                        canvas
+                            .cell(uncurses::layout::Position::new(x, y))
+                            .is_some_and(|c| c.style.bg == Some(crate::status::SURFACE))
+                    })
+                })
+                .map(|y| text.get(y as usize).cloned().unwrap_or_default())
+                .collect()
+        };
+
+        // No selection -> nothing is highlighted (the glanceable default).
+        assert!(highlighted(&ui(View::Mine)).is_empty());
+
+        // Selecting the second row highlights exactly that row, whole: the bar
+        // reaches the leading marker column, which the caret used to occupy.
+        let sel = highlighted(&Ui {
+            selected: Some(1),
+            ..ui(View::Mine)
+        });
+        assert_eq!(sel.len(), 1, "expected one highlighted row, got {sel:?}");
+        assert!(sel[0].contains("#2"), "wrong row highlighted: {:?}", sel[0]);
     }
 }

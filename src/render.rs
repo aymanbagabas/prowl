@@ -284,12 +284,35 @@ pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     }
 }
 
-/// The selection caret for the row the navigation cursor is on. It sits in the
-/// same leading column as the change marker, overriding it when a row is both
-/// changed and selected.
-pub fn select_marker(ascii: bool) -> Cell {
-    let m = if ascii { ">" } else { "\u{276f}" };
-    Cell::styled(m, status::fg(status::PEACH).bold())
+/// The painted width of `s`: one past the rightmost non-blank cell, over every
+/// row. What the selection bar spans, so it covers the dashboard's content
+/// rather than the full width of the terminal behind it.
+fn content_width(s: &impl Surface) -> u16 {
+    let b = s.bounds();
+    let mut w = 0;
+    for y in b.y..b.y + b.height {
+        for x in (w..b.width).rev() {
+            if s.cell(Position::new(x, y)).is_some_and(|c| !c.is_blank()) {
+                w = x + 1;
+                break;
+            }
+        }
+    }
+    w
+}
+
+/// Paint the selection background across row `y` of `s`, spanning its content:
+/// the row the navigation cursor is on is highlighted rather than marked with a
+/// glyph, so the leading column stays free and a row that is both changed and
+/// selected shows both. Only the background is set — every cell keeps its text,
+/// color and link — and it runs after the body is painted, so it covers a
+/// hand-laid-out section (the shipments) exactly as it covers the tables.
+pub fn highlight_row(s: &mut impl TextSurface, y: u16) {
+    for x in 0..content_width(s) {
+        if let Some(cell) = s.cell_mut(Position::new(x, y)) {
+            cell.style.bg = Some(status::SURFACE);
+        }
+    }
 }
 
 /// Paint the watch-mode key-hint footer at row `y`, folding the constant
@@ -405,8 +428,12 @@ pub fn paint_search_prompt(
 /// top, then `bottom` glued to the last rows. When the body is taller than the
 /// space left over it scrolls, keeping `caret` (a row index into `body`) centered
 /// in view. `screen` is assumed already cleared, so the gap between the two is
-/// blank padding. Returns the row the bottom block starts on, which callers need
-/// to translate positions inside it (the search caret) into screen coordinates.
+/// blank padding.
+///
+/// Returns the row the bottom block starts on and how many rows were cut from
+/// its head, which callers need to translate a position inside it (the search
+/// caret) into screen coordinates: bottom row `y` lands on `top + y - cut`, and
+/// a row above `cut` was not drawn at all.
 pub fn compose<T: SurfaceMut + Bounded + ?Sized>(
     screen: &mut T,
     body: &mut TextBuffer,
@@ -415,11 +442,12 @@ pub fn compose<T: SurfaceMut + Bounded + ?Sized>(
     bottom_h: u16,
     rows: u16,
     caret: Option<u16>,
-) -> u16 {
+) -> (u16, u16) {
     // The bottom block wins the space it needs; if it alone overflows (a short
-    // terminal with the help legend open) it keeps its head — the search prompt,
-    // error line and footer — and the legend below them is what gets cut.
+    // terminal with the help legend open) it keeps its tail — the search prompt,
+    // error line and footer — and the legend above them is what gets cut.
     let shown_bottom = bottom_h.min(rows);
+    let cut = bottom_h - shown_bottom;
     let avail = rows - shown_bottom;
 
     // Centering the caret scrolls the body a row at a time in either direction;
@@ -435,8 +463,9 @@ pub fn compose<T: SurfaceMut + Bounded + ?Sized>(
         BufView::new(body, Rect::new(0, off, w, avail)).draw(screen, Position::new(0, 0));
     }
     let top = rows - shown_bottom;
-    bottom.draw(screen, Position::new(0, top));
-    top
+    let bw = bottom.width();
+    BufView::new(bottom, Rect::new(0, cut, bw, shown_bottom)).draw(screen, Position::new(0, top));
+    (top, cut)
 }
 
 /// Paint one indented `glyph  meaning` legend row at `y`: the glyph in `gstyle`,
@@ -457,8 +486,9 @@ fn legend_row(
 /// the glyphs and values that view actually uses, so a glyph the other view
 /// reuses for something else can't muddy it. The Mine view lists the status
 /// glyphs + every `mergeStateStatus` value; the Reviews view lists the
-/// review-state glyphs + the merged glyph (its only shared icon). Returns the
-/// next free row.
+/// review-state glyphs + the merged glyph (its only shared icon). Painted above
+/// the search prompt / footer, since it documents the keys they list. Returns
+/// the next free row.
 pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -> u16 {
     let dim = Style::new().faint();
     let mut y = paint_header(s, "Help", status::OVERLAY, None, None, ascii, top);
@@ -573,28 +603,51 @@ mod tests {
     }
 
     #[test]
+    fn compose_reports_the_rows_cut_from_the_bottom_block() {
+        let (mut b, bh) = buf(&["body"]);
+        let mut at = |rows| {
+            let (mut bot, both) = buf(&["help", "search", "footer"]);
+            let mut screen = TextBuffer::new(8, rows);
+            compose(&mut screen, &mut b, bh, &mut bot, both, rows, None)
+        };
+        // Room for everything: nothing is cut, so a position in the block maps
+        // straight onto `top + y`.
+        assert_eq!(at(5), (2, 0));
+        // Too short: the head goes. The search prompt (block row 1) is still
+        // drawn, now at screen row `top + 1 - cut`.
+        let (top, cut) = at(2);
+        assert_eq!((top, cut), (0, 1));
+        assert_eq!(top + (1 - cut), 0);
+        // Shorter still: only the footer survives and the prompt is gone, which
+        // the caller detects as `y < cut`.
+        let (_, cut) = at(1);
+        assert_eq!(cut, 2);
+        assert!(1 < cut);
+    }
+
+    #[test]
     fn compose_keeps_the_footer_when_the_bottom_block_overflows() {
         // Too short for both: the body goes, and the bottom block is cut from
-        // the end so its first lines — up to and including the footer — stay.
+        // the start so its last lines — down to the footer — stay.
         assert_eq!(
-            screen_rows(&["a", "b"], &["footer", "h1", "h2"], 2, None),
-            ["footer", "h1"]
+            screen_rows(&["a", "b"], &["h1", "h2", "footer"], 2, None),
+            ["h2", "footer"]
         );
     }
 
     #[test]
     fn compose_never_panics_and_always_keeps_the_footer() {
-        // Degenerate shapes must not panic and must never drop the head of the
+        // Degenerate shapes must not panic and must never drop the tail of the
         // bottom block, where the footer lives.
         let bodies: [&[&str]; 4] = [&[], &["a"], &["a", "b", "c", "d", "e", "f"], &["x", "", ""]];
-        let bottoms: [&[&str]; 3] = [&[], &["f"], &["f", "h1", "h2", "h3"]];
+        let bottoms: [&[&str]; 3] = [&[], &["f"], &["h1", "h2", "h3", "f"]];
         for body in bodies {
             for bottom in bottoms {
                 for rows in 1..12u16 {
                     for caret in [None, Some(0), Some(1), Some(5), Some(100)] {
                         let out = screen_rows(body, bottom, rows, caret);
                         assert_eq!(out.len(), rows as usize, "{body:?}/{bottom:?}/{rows}");
-                        if let Some(footer) = bottom.first() {
+                        if let Some(footer) = bottom.last() {
                             assert!(out.contains(&(*footer).to_string()));
                         }
                     }

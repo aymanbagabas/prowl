@@ -15,14 +15,14 @@ output with `--view`):
 - **Reviews**: **Reviews** (open PRs awaiting / under my review, each with a
   per-row review-state glyph) **→ Reviewed & merged** (merged PRs I reviewed).
 
-Below the active view is a `r refresh (every 5m) - tab switch view - enter open -
+Below the active view is an optional help legend, an optional search prompt, and
+last a `r refresh (every 5m) - tab switch view - enter open -
 y copy - / search - ? help` footer (which also shows the refresh interval, and
-reads `r refreshing` while a fetch is in flight), an optional search prompt, and an
-optional help legend last at the bottom. While watching, the very top shows a
-`my PRs / reviews` tab strip with the active view accented. It rings the terminal
-bell when one of your PRs merges or an open PR's status changes, and flags the
-changed rows (the bell and change markers track the Mine view only). The
-interactive watch runs on the
+reads `r refreshing` while a fetch is in flight). While watching, the very top
+shows a `my PRs / reviews` tab strip with the active view accented. It rings the
+terminal bell when one of your PRs merges or an open PR's status changes, and
+flags the changed rows (the bell and change markers track the Mine view only).
+The interactive watch runs on the
 [**uncurses**](https://github.com/aymanbagabas/uncurses) toolkit with an event
 loop: it shows an *inline* `Loading...` frame, then enters the **alternate
 screen** [`Screen`] once the first fetch lands (or immediately when there's a
@@ -102,15 +102,20 @@ watch event loop); everything else is testable modules:
   `title_width` (cap/align the shared `TITLE` column so every table lines up and
   the whole view stays within `MAX_WIDTH` = 120). Headers (with an optional dim
   count badge and trailing note — the queue ETA), the `tabs` view-switcher strip,
-  the leading-column markers (`change_marker`, and the `select_marker` navigation
-  caret that overrides it on the selected row), the key-hint footer (carrying the
+  the leading-column `change_marker` and the selected-row highlight
+  (`highlight_row` paints the selection background across one screen row, over
+  the body's content width, once the body is painted — so it covers the
+  hand-laid-out shipments section too, and the change marker stays visible
+  underneath instead of being overwritten by a caret), the key-hint footer
+  (carrying the
   refresh interval and the `enter open` / `/ search` hints), the search prompt
   line (the `/` query + match count; it paints no cursor and instead *returns*
   the caret cell, so the watch can park the terminal's real one there), and the
   help legend
   (`paint_help(view, …)` — a movement-keys line then, contextual: the
   mergeability glyphs for Mine, review glyphs for Reviews; the column headers
-  speak for themselves and are not repeated) live here too, plus `render_table`
+  speak for themselves and are not repeated; first in the bottom block, above the
+  search prompt and footer) live here too, plus `render_table`
   (paint one table to a string, for tests) and `paint_dim`/`paint_dim_at`, the
   dim one-liners — the trailing status line flush left, an empty section's
   placeholder indented by `ROW_INDENT` so it lines up with the rows it stands in
@@ -119,9 +124,9 @@ watch event loop); everything else is testable modules:
   caret)` fills exactly `rows` rows — as much of the body as fits at the top,
   blank padding, then the bottom block glued to the last rows — and returns the
   row that block starts on. When the body is taller than the space left over it
-  scrolls, keeping `caret` (the row a view reported painting its selection caret
-  on) centered; when the bottom block alone overflows it keeps its head, so the
-  footer survives and the help legend is what gets cut. The body is drawn through
+  scrolls, keeping `caret` (the row a view reported the selection landed on)
+  centered; when the bottom block alone overflows it is cut from the start, so
+  the footer survives and the help legend is what goes. The body is drawn through
   a `uncurses::buffer::View`, which clips without translating, so blitting it maps
   the first visible body row onto the top of the screen.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
@@ -145,9 +150,9 @@ watch event loop); everything else is testable modules:
   app integrations). The `Merge Queue` header also carries the queue-level ETA
   (`~11m to merge`, from `mergeQueue.nextEntryEstimatedTimeToMerge`) as a dim
   note. The
-  merged columns are `[mark] [ ] PR TITLE RELEASE MERGED` (no per-row glyph —
-  every row there is merged; the blank second column just keeps the tables
-  aligned), where `RELEASE` is the release
+  merged columns are `[mark] PR TITLE RELEASE MERGED` (no per-row glyph — every
+  row there is merged — and no blank stand-in for one either, so the rows start
+  at the same indent as every other section's), where `RELEASE` is the release
   that shipped the PR (a link to its release page) or `—` if not yet shipped,
   looked up from the `commits::ReleaseMap`.
 - `reviews.rs` — the Reviews view's rows/tables. `ReviewRow` (open: `glyph PR
@@ -275,9 +280,12 @@ opens the selected row, `y`/`Y` copy links, the movement keys drive the cursor,
 - **Resilience:** a failed API call keeps the last good data, shows a dim error
   line, and does not ring.
 - **Navigation / open:** a lazy selection cursor (`nav`, watch only) — `None`
-  until the first movement key, then a `select_marker` caret on the chosen row
-  (it overrides the change marker, and works in the custom shipments painter
-  too). `j`/`k` (or the arrows) move one row, `g`/`G` jump to first/last,
+  until the first movement key, then the chosen row is painted with the
+  selection background (`status::SURFACE`) across the body's content width
+  (`render::highlight_row`, applied once the body is painted) — no caret glyph,
+  so the change marker still shows through, and the custom shipments painter is
+  covered for free. `j`/`k` (or the arrows) move one row, `g`/`G` jump to
+  first/last,
   `Ctrl-D`/`Ctrl-U` half a page (sized from the screen's `window_cells`); Enter
   opens the selected row — the PR, or a shipments release / the upcoming compare
   log — via `open::url`. Every row across all sections of the active view is one
@@ -315,13 +323,14 @@ opens the selected row, `y`/`Y` copy links, the movement keys drive the cursor,
   dashboard or spill into the shell. `r`/`R` forces a refresh now; `Tab` switches
   view; `?` toggles the help legend (contextual to the active view —
   mergeability glyphs for Mine, review glyphs for Reviews — hidden by
-  default, rendered last at the very bottom; `--no-help` only affects
+  default, rendered at the top of the bottom block, above the search prompt and
+  footer whose keys it documents; `--no-help` only affects
   one-shot/piped output). The movement keys (`j`/`k`, arrows, `g`/`G`,
   `Ctrl-D`/`Ctrl-U`) drive the selection cursor, Enter opens it, `y`/`Y` copy it
   (row / whole section), and `/` filters.
   `q`/`Q`/`Ctrl-C` quit (as does `Esc` with no filter applied) and `Ctrl-Z`
-  suspends/resumes. The bottom block — search prompt, error line, footer, help
-  legend — is **pinned** to the last rows of the screen (`render::compose`), and
+  suspends/resumes. The bottom block — help legend, search prompt, error line,
+  footer — is **pinned** to the last rows of the screen (`render::compose`), and
   the sections scroll under it, following the selection. The only persistent
   bottom line is the footer
   (`r refresh (every 5m) - tab switch view - enter open - y copy - / search - ?
@@ -386,7 +395,27 @@ findings fail CI.
 CI (`.github/workflows/build.yml`) runs fmt/clippy/build/test (the `build` job)
 and `cargo audit` for dependency advisories (the `audit` job) on push and PRs.
 
+## The README screenshot
+
+`task screenshot` regenerates it. `examples/demo.rs` builds a fake `Sections`
+(made-up repo, PRs and authors; timestamps relative to now) and prints it
+through the real `render_to_string` — the same painters `--once` uses — so the
+shot can't drift from the layout, which is why `Sections`, `Ui` and
+`render_to_string` are
+`pub`, same as everything else the offline tests reach. `demo.tape` shoots it
+with [vhs](https://github.com/charmbracelet/vhs) (Nerd Font, Catppuccin Mocha;
+the trailing `Sleep` is required or vhs exits before writing the file), and the
+task uploads `demo.png` to GitHub's CDN and rewrites the `<img>` URL in
+`README.md`. `demo.png` is gitignored — no binary in the repo. An uploaded asset
+only goes public once its URL appears in a comment/issue/PR body (a commit that
+references it does *not* count), so the task posts and deletes a commit comment,
+then polls the URL anonymously until it answers 200.
+
 ## Releases
+
+`task release` cuts one: `svu next` picks the version, writes it to
+`Cargo.toml`, refreshes `Cargo.lock`, commits (`chore(release): vX.Y.Z`), tags,
+pushes, and watches the workflow run. It only runs from a clean `main`.
 
 Tag `vX.Y.Z` → `.github/workflows/release.yml` runs **GoReleaser Pro**
 (`.goreleaser.yaml`). The config `includes:` shared snippets from

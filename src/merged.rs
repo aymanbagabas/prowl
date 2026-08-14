@@ -53,9 +53,6 @@ pub fn to_table(rows: &[MergedRow], ascii: bool, highlight: &HashSet<i64>) -> Ta
         };
         out.push(vec![
             render::change_marker(highlight.contains(&r.number), ascii),
-            // Blank spacer where the open-PRs table has its mergeability glyph,
-            // so both tables' PR/TITLE columns start at the same screen column.
-            Cell::plain(" "),
             Cell::pr(r.number, r.url.clone(), status::fg(BLUE)),
             Cell::plain(r.title.clone()),
             release,
@@ -63,7 +60,7 @@ pub fn to_table(rows: &[MergedRow], ascii: bool, highlight: &HashSet<i64>) -> Ta
         ]);
     }
     Table {
-        header: vec!["", "", "PR", "TITLE", "RELEASE", "MERGED"],
+        header: vec!["", "PR", "TITLE", "RELEASE", "MERGED"],
         rows: out,
     }
 }
