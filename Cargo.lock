@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "prowl"
-version = "0.1.0"
+version = "1.11.0"
 dependencies = [
  "anstyle",
  "anyhow",
