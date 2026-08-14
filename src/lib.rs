@@ -602,9 +602,9 @@ fn render_reviews(f: &mut String, s: &Sections, cli: &Cli, styled: bool, selecte
     }
 }
 
-/// The help legend for `view` (the glyphs that view uses), shown at the very
-/// bottom. Empty (no leading/trailing blank) when `show_help` is false; ends
-/// with a newline otherwise.
+/// The help legend for `view` (the glyphs that view uses), shown at the top of
+/// the bottom block. Empty (no leading/trailing blank) when `show_help` is
+/// false; ends with a newline otherwise.
 fn help_block(cli: &Cli, view: View, show_help: bool, styled: bool) -> String {
     if !show_help {
         return String::new();
@@ -613,14 +613,16 @@ fn help_block(cli: &Cli, view: View, show_help: bool, styled: bool) -> String {
     render::help(view, ascii, styled)
 }
 
-/// Compose the bottom of the frame in order: the search prompt (empty unless a
-/// search is active), an error line (empty unless a refresh failed), then (watch
-/// only) the key-hint footer, then the help legend last. Any part may be empty
-/// to omit it; present parts are separated by a single blank line. The render
-/// body already ends with a blank line, so the first part is not prefixed.
+/// Compose the bottom of the frame in order: the help legend first (empty
+/// unless it is toggled on), then the search prompt (empty unless a search is
+/// active), an error line (empty unless a refresh failed), and (watch only) the
+/// key-hint footer last — the legend explains the keys, so it reads above them
+/// rather than pushing them up. Any part may be empty to omit it; present parts
+/// are separated by a single blank line. The render body already ends with a
+/// blank line, so the first part is not prefixed.
 pub fn bottom(search: &str, status: &str, footer: &str, help: &str) -> String {
     let mut out = String::new();
-    for part in [search, status, footer, help] {
+    for part in [help, search, status, footer] {
         if part.is_empty() {
             continue;
         }
@@ -807,8 +809,8 @@ impl Drop for ScreenGuard {
 
 /// Paint `body` with `bottom` beneath it, flushing stdout. Only ever called
 /// while watching, where the dashboard owns the alternate screen and knows how
-/// tall it is, so the frame is pinned: `bottom` (search prompt, error line,
-/// footer, help) sits on the last rows and the body scrolls under it, following
+/// tall it is, so the frame is pinned: `bottom` (help, search prompt, error
+/// line, footer) sits on the last rows and the body scrolls under it, following
 /// the selection caret. If the height can't be read after all, it degrades to a
 /// plain clear-and-print.
 fn repaint(body: &str, bottom: &str) -> std::io::Result<()> {
@@ -1226,5 +1228,19 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn bottom_puts_the_help_legend_above_the_footer() {
+        let out = bottom("search", "status", "footer", "help");
+        let at = |part: &str| out.find(part).expect("part present");
+        assert!(at("help") < at("search"));
+        assert!(at("search") < at("status"));
+        assert!(at("status") < at("footer"));
+        // Present parts are separated by a blank line, and the block ends with one
+        // newline so it can be printed straight after the body.
+        assert_eq!(out, "help\n\nsearch\n\nstatus\n\nfooter\n");
+        // Empty parts are simply omitted.
+        assert_eq!(bottom("", "", "footer", ""), "footer\n");
     }
 }

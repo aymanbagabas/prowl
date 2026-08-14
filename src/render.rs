@@ -405,7 +405,8 @@ pub fn highlight_selected(body: &str) -> String {
 /// glyph the other view reuses for something else can't muddy it. The Mine view
 /// lists the mergeability glyphs, the Reviews view the review-state glyphs. The
 /// column headers explain themselves, so they are not repeated here. The title
-/// reuses the section-header style; meanings are dim.
+/// reuses the section-header style; meanings are dim. Rendered above the search
+/// prompt / footer, since it documents the keys they list.
 pub fn help(view: View, ascii: bool, styled: bool) -> String {
     let dim = Style::new().dimmed();
     let mut out = String::new();
@@ -588,9 +589,9 @@ pub fn frame(body: &str, bottom: &str, rows: usize, caret: Option<usize>) -> Str
     let body: Vec<&str> = body.lines().collect();
     let all_bottom: Vec<&str> = bottom.lines().collect();
     // The bottom block wins the space it needs; if it alone overflows (a short
-    // terminal with the help legend open), it keeps its head — the search
-    // prompt, error line and footer — and the legend below them is what gets cut.
-    let bottom = &all_bottom[..all_bottom.len().min(rows)];
+    // terminal with the help legend open), it keeps its tail — the search
+    // prompt, error line and footer — and the legend above them is what gets cut.
+    let bottom = &all_bottom[all_bottom.len().saturating_sub(rows)..];
     let avail = rows - bottom.len();
 
     // Centering the caret makes the body scroll a line at a time in either
@@ -905,10 +906,10 @@ mod tests {
     #[test]
     fn frame_keeps_the_footer_when_the_bottom_block_overflows() {
         // Too short for both: the body goes, and the bottom block is cut from
-        // the end so its first lines — up to and including the footer — stay.
+        // the start so its last lines — down to the footer — stay.
         assert_eq!(
-            rows_of(&frame("a\nb\n", "footer\nh1\nh2", 2, None)),
-            ["footer", "h1"]
+            rows_of(&frame("a\nb\n", "h1\nh2\nfooter", 2, None)),
+            ["h2", "footer"]
         );
     }
 
@@ -916,9 +917,9 @@ mod tests {
     fn frame_always_fills_exactly_the_screen() {
         // Degenerate shapes must not panic, must paint exactly `rows` lines,
         // must not end with a newline (which would scroll the screen), and must
-        // never drop the head of the bottom block (where the footer lives).
+        // never drop the tail of the bottom block (where the footer lives).
         let bodies = ["", "\n", "a", "a\n", "a\nb\nc\nd\ne\nf\ng\nh\n", "x\n\n\n"];
-        let bottoms = ["", "f", "s\nf", "f\nh1\nh2\nh3\nh4"];
+        let bottoms = ["", "f", "s\nf", "h1\nh2\nh3\nh4\nf"];
         for body in bodies {
             for bottom in bottoms {
                 for rows in 0..12usize {
@@ -930,7 +931,7 @@ mod tests {
                         }
                         assert_eq!(rows_of(&screen).len(), rows, "{body:?}/{bottom:?}/{rows}");
                         assert!(!screen.ends_with('\n'));
-                        if let Some(footer) = bottom.lines().next() {
+                        if let Some(footer) = bottom.lines().next_back() {
                             assert!(screen.contains(footer), "{body:?}/{bottom:?}/{rows}");
                         }
                     }

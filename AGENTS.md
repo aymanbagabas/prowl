@@ -15,10 +15,10 @@ output with `--view`):
 - **Reviews**: **Reviews** (open PRs awaiting / under my review, each with a
   per-row review-state glyph) **→ Reviewed & merged** (merged PRs I reviewed).
 
-Below the active view is a `r refresh (every 5m) - tab switch view - enter open -
+Below the active view is an optional help legend, an optional search prompt, and
+last a `r refresh (every 5m) - tab switch view - enter open -
 y copy - / search - ? help` footer (which also shows the refresh interval, and
-reads `r refreshing` while a fetch is in flight), an optional search prompt, and
-an optional help legend last
+reads `r refreshing` while a fetch is in flight)
 at the bottom. While watching, the very top shows a `my PRs / reviews` tab strip
 with the active view accented. It rings the terminal bell when one of your PRs
 merges or an open PR's status changes, and flags the changed rows (the bell and
@@ -92,7 +92,8 @@ everything else is testable modules:
   `/` query with a block cursor + match count), help
   legend (`help(view, …)` — a movement-keys line then, contextual: the
   mergeability glyphs for Mine, review glyphs for Reviews; the column headers
-  speak for themselves and are not repeated; last at the very bottom),
+  speak for themselves and are not repeated; first in the bottom block, above the
+  search prompt and footer),
   loading screen, bell, clear, and the dim one-liners: `empty_line` (the error
   line, the loading screen) and `placeholder` (an empty section's stand-in row,
   indented — `ROW_INDENT` — so it lines up with the rows it replaces). It also
@@ -103,8 +104,8 @@ everything else is testable modules:
   body as fits, blank padding, then the bottom block glued to the last rows.
   When the body is taller than what's left it scrolls to keep `caret`
   (`caret_line`, which locates the selected row by its unique background)
-  centered; when the bottom block alone overflows it is cut from the end, so the
-  footer survives and the help legend is what goes. Each line erases its own
+  centered; when the bottom block alone overflows it is cut from the start, so
+  the footer survives and the help legend is what goes. Each line erases its own
   tail and the last has no trailing newline, so painting a frame at `HOME` never
   scrolls the screen — no clear, no flicker.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
@@ -265,11 +266,12 @@ everything else is testable modules:
   spill into the shell; signal keys (Ctrl-C/Ctrl-Z) still fire. `r`/`R` forces a
   refresh now; `Tab` switches view; `?` toggles the help legend
   (contextual to the active view — mergeability glyphs for Mine, review glyphs
-  for Reviews — hidden by default, rendered last at the very bottom; `--no-help` only affects one-shot/piped output). The movement keys
+  for Reviews — hidden by default, rendered at the top of the bottom block, above
+  the search prompt and footer whose keys it documents; `--no-help` only affects one-shot/piped output). The movement keys
   (`j`/`k`, arrows, `g`/`G`, `Ctrl-D`/`Ctrl-U`) drive the selection cursor,
   Enter opens it, `y`/`Y` copy it (row / whole section), and `/` filters (Esc
-  clears). The bottom block — search
-  prompt, error line, footer, help legend — is glued to the last rows of the
+  clears). The bottom block — help legend, search
+  prompt, error line, footer — is glued to the last rows of the
   screen (`render::frame`), and the sections scroll under it, following the
   selection. The only persistent
   bottom line is the footer
