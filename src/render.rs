@@ -310,12 +310,95 @@ pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     }
 }
 
-/// The selection caret for the row the navigation cursor is on. It sits in the
-/// same leading column as the change marker, overriding it when a row is both
-/// changed and selected.
-pub fn select_marker(ascii: bool) -> Cell {
-    let m = if ascii { ">" } else { "\u{276f}" };
-    Cell::styled(m, status::fg(status::PEACH).bold())
+/// The selection background for the row the navigation cursor is on: the whole
+/// line is painted with it (see `highlight_selected`), so the leading column
+/// stays free for the change marker.
+pub fn select_style() -> Style {
+    status::bg(status::SURFACE)
+}
+
+/// Mark `row` as the selected one by giving its first cell the selection
+/// background. The cell keeps its own styling, and the background is what
+/// `highlight_selected` looks for to paint the rest of the line.
+pub fn select_row(row: &mut [Cell]) {
+    if let Some(first) = row.first_mut() {
+        first.style = first.style.bg_color(select_style().get_bg_color());
+    }
+}
+
+/// The escape sequence setting the selection background. `anstyle` renders each
+/// attribute as its own sequence, so this appears verbatim in a marked cell
+/// however that cell is otherwise styled.
+fn select_bg() -> String {
+    select_style().render().to_string()
+}
+
+const RESET: &str = "\x1b[0m";
+
+/// The display width of `s`, ignoring the escapes in it (SGR attributes and
+/// OSC-8 hyperlinks) — i.e. how many columns it actually paints.
+fn visible_width(s: &str) -> usize {
+    let mut width = 0;
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            width += UnicodeWidthChar::width(ch).unwrap_or(0);
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameter bytes, then a final byte in `@`..`~`.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: a payload ended by BEL or a string terminator (ESC \).
+            Some(']') => {
+                let mut esc = false;
+                for c in chars.by_ref() {
+                    if c == '\x07' || (esc && c == '\\') {
+                        break;
+                    }
+                    esc = c == '\x1b';
+                }
+            }
+            _ => {}
+        }
+    }
+    width
+}
+
+/// Paint the selected row across the full width of the body: the row is marked
+/// by `select_row`, which only backgrounds its leading cell, so here the
+/// background is re-armed after every cell's reset and the line is padded out to
+/// the widest line in the body. The result is one solid bar. Bodies with no
+/// selection (and unstyled ones, which carry no escapes at all) come back
+/// unchanged.
+pub fn highlight_selected(body: &str) -> String {
+    let bg = select_bg();
+    if !body.contains(&bg) {
+        return body.to_string();
+    }
+    let width = body.split('\n').map(visible_width).max().unwrap_or(0);
+    let rearmed = format!("{RESET}{bg}");
+    body.split('\n')
+        .map(|line| {
+            if !line.contains(&bg) {
+                return line.to_string();
+            }
+            let mut out = String::with_capacity(line.len() + width);
+            out.push_str(&bg);
+            out.push_str(&line.replace(RESET, &rearmed));
+            for _ in 0..width.saturating_sub(visible_width(line)) {
+                out.push(' ');
+            }
+            out.push_str(RESET);
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The help legend for `view`: only the glyphs that view actually uses, so a
@@ -485,18 +568,14 @@ pub const ENTER_SCREEN: &str = "\x1b[?1049h\x1b[?7l\x1b[?25l";
 /// scrollback back the way we found it.
 pub const LEAVE_SCREEN: &str = "\x1b[?25h\x1b[?7h\x1b[?1049l";
 
-/// The index of the body line carrying the navigation caret, if any — what the
-/// pinned frame scrolls to keep in view. The caret's styling is unique to it
-/// (the change marker in the same column uses another color), so looking for
-/// the rendered sequence locates the selected row wherever it was drawn,
-/// including in the shipments section, which lays out its rows by hand.
+/// The index of the body line carrying the selection, if any — what the pinned
+/// frame scrolls to keep in view. The selection background is unique to that
+/// line (nothing else in the dashboard sets one), so looking for the sequence
+/// locates the selected row wherever it was drawn, including in the shipments
+/// section, which lays out its rows by hand.
 pub fn caret_line(body: &str) -> Option<usize> {
-    let needles = [
-        render_cell(&select_marker(false), true),
-        render_cell(&select_marker(true), true),
-    ];
-    body.lines()
-        .position(|l| needles.iter().any(|n| l.contains(n.as_str())))
+    let bg = select_bg();
+    body.lines().position(|l| l.contains(&bg))
 }
 
 /// Compose one screen of exactly `rows` lines: as much of `body` as fits, blank
@@ -862,12 +941,56 @@ mod tests {
 
     #[test]
     fn caret_line_finds_the_selected_row() {
-        let caret = render_cell(&select_marker(false), true);
-        // The change marker shares the column but not the styling, so it can't
-        // be mistaken for the caret.
+        let mut row = [change_marker(false, false)];
+        select_row(&mut row);
+        let selected = render_cell(&row[0], true);
+        // The change marker shares the column but sets no background, so it
+        // can't be mistaken for the selection.
         let changed = render_cell(&change_marker(true, false), true);
-        let body = format!("head\n{changed} changed\n{caret} selected\ntail");
+        let body = format!("head\n{changed} changed\n{selected} selected\ntail");
         assert_eq!(caret_line(&body), Some(2));
         assert_eq!(caret_line("nothing selected"), None);
+    }
+
+    #[test]
+    fn visible_width_ignores_escapes() {
+        let cell = render_cell(&Cell::link("#12", "https://pr/12"), true);
+        assert_eq!(visible_width(&cell), 3);
+        assert_eq!(visible_width("plain"), 5);
+    }
+
+    #[test]
+    fn highlight_selected_paints_the_whole_marked_line() {
+        let mut row = [change_marker(true, false), Cell::plain("x")];
+        select_row(&mut row);
+        let marked = format!(
+            "{}{}",
+            render_cell(&row[0], true),
+            render_cell(&row[1], true)
+        );
+        let body = format!("a much longer line\n{marked}\ntail\n");
+        let out = highlight_selected(&body);
+
+        let bg = select_bg();
+        let lines: Vec<&str> = out.split('\n').collect();
+        // Only the marked line is painted, and the trailing newline survives.
+        assert_eq!(lines.len(), 4);
+        assert!(!lines[0].contains(&bg) && !lines[2].contains(&bg));
+        // It is padded out to the widest line in the body, and every reset in it
+        // re-arms the background so no cell punches a hole in the bar.
+        assert_eq!(visible_width(lines[1]), "a much longer line".len());
+        assert!(lines[1].ends_with(RESET));
+        let body_of_line = lines[1].strip_suffix(RESET).unwrap();
+        assert!(
+            body_of_line
+                .split(RESET)
+                .skip(1)
+                .all(|rest| rest.starts_with(&bg))
+        );
+        // A body with no selection comes back untouched.
+        assert_eq!(
+            highlight_selected(&body.replace(&bg, "")),
+            body.replace(&bg, "")
+        );
     }
 }

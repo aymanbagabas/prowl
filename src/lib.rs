@@ -213,16 +213,15 @@ fn render_body(
         View::Mine => render_mine(&mut f, s, cli, changes, styled, selected),
         View::Reviews => render_reviews(&mut f, s, cli, styled, selected),
     }
-    f
+    render::highlight_selected(&f)
 }
 
-/// Overwrite the leading marker cell of `table`'s `local`-th row with the
-/// navigation caret (a no-op when there's no such table or row).
-fn place_caret(table: Option<&mut render::Table>, local: usize, ascii: bool) {
-    if let Some(row) = table.and_then(|t| t.rows.get_mut(local))
-        && let Some(first) = row.first_mut()
-    {
-        *first = render::select_marker(ascii);
+/// Paint `table`'s `local`-th row as the selected one (a no-op when there's no
+/// such table or row). Only a mark here — `render::highlight_selected` extends
+/// it across the whole rendered line once the body is assembled.
+fn select_row(table: Option<&mut render::Table>, local: usize) {
+    if let Some(row) = table.and_then(|t| t.rows.get_mut(local)) {
+        render::select_row(row);
     }
 }
 
@@ -472,7 +471,7 @@ fn render_mine(
         render::fit_titles(&mut tables, ascii);
     }
 
-    // Place the navigation caret: map the global selection onto the section it
+    // Mark the selected row: map the global selection onto the section it
     // falls in. Every PR/queue/merged row is navigable, so the local index is
     // the offset past the earlier sections; any remainder indexes the shipments'
     // navigable rows (handled by `render_commits`).
@@ -482,11 +481,11 @@ fn render_mine(
         let nq = s.queue.as_ref().map_or(0, Vec::len);
         let nm = s.merged.as_ref().map_or(0, Vec::len);
         if sel < np {
-            place_caret(prs_table.as_mut(), sel, ascii);
+            select_row(prs_table.as_mut(), sel);
         } else if sel < np + nq {
-            place_caret(queue_table.as_mut(), sel - np, ascii);
+            select_row(queue_table.as_mut(), sel - np);
         } else if sel < np + nq + nm {
-            place_caret(merged_table.as_mut(), sel - np - nq, ascii);
+            select_row(merged_table.as_mut(), sel - np - nq);
         } else {
             ship_sel = Some(sel - np - nq - nm);
         }
@@ -537,7 +536,7 @@ fn render_mine(
     }
 
     if let Some(stats) = &s.commits {
-        render_commits(f, stats, ascii, ship_sel, styled);
+        render_commits(f, stats, ship_sel, styled);
         f.push('\n');
     }
 }
@@ -565,14 +564,14 @@ fn render_reviews(f: &mut String, s: &Sections, cli: &Cli, styled: bool, selecte
         render::fit_titles(&mut tables, ascii);
     }
 
-    // Place the navigation caret: the open reviews come first, then the reviewed
+    // Mark the selected row: the open reviews come first, then the reviewed
     // & merged rows, so the selection index past the open rows indexes the latter.
     if let Some(sel) = selected {
         let nr = s.reviews.as_ref().map_or(0, Vec::len);
         if sel < nr {
-            place_caret(open_table.as_mut(), sel, ascii);
+            select_row(open_table.as_mut(), sel);
         } else {
-            place_caret(merged_table.as_mut(), sel - nr, ascii);
+            select_row(merged_table.as_mut(), sel - nr);
         }
     }
 
@@ -664,7 +663,6 @@ fn search_line(ui: &Ui, shown: &Sections, styled: bool) -> String {
 fn render_commits(
     f: &mut String,
     stats: &commits::CommitStats,
-    ascii: bool,
     selected: Option<usize>,
     styled: bool,
 ) {
@@ -742,13 +740,12 @@ fn render_commits(
             Some(url) => render::Cell::link_styled(label.clone(), url.clone(), style),
             None => render::Cell::styled(label.clone(), style),
         };
-        // A 2-column leading gutter: the caret on the selected row, else blank,
-        // keeping the labels aligned with or without a caret.
+        // A 2-column leading gutter, backgrounded on the selected row (the mark
+        // `highlight_selected` extends across the line) and blank otherwise, so
+        // the labels line up either way.
         let gutter = if Some(i) == sel_row {
-            format!(
-                "{} ",
-                render::render_cell(&render::select_marker(ascii), styled)
-            )
+            let cell = render::Cell::styled("  ", render::select_style());
+            render::render_cell(&cell, styled)
         } else {
             "  ".to_string()
         };
@@ -1181,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_places_the_caret_on_the_chosen_row() {
+    fn selection_paints_the_chosen_row() {
         let cli = Cli::parse_from(["prowl"]);
         let pr = |n: i64| prs::PrRow {
             number: n,
@@ -1206,12 +1203,10 @@ mod tests {
             reviews: None,
             reviewed_merged: None,
         };
-        let caret = '\u{276f}';
-        // No selection -> no caret anywhere (the glanceable default).
+        // No selection -> nothing is painted (the glanceable default).
         let none = render_body(&sections, &cli, View::Mine, &Changes::default(), true, None);
-        assert!(!none.contains(caret));
-        // Selecting the second row draws exactly one caret, on that row (its
-        // segment precedes the #2 link).
+        assert_eq!(render::caret_line(&none), None);
+        // Selecting the second row paints exactly that row, whole.
         let sel = render_body(
             &sections,
             &cli,
@@ -1220,9 +1215,14 @@ mod tests {
             true,
             Some(1),
         );
-        assert_eq!(sel.matches(caret).count(), 1);
-        let caret_at = sel.find(caret).unwrap();
-        assert!(caret_at < sel.find("#2").unwrap());
-        assert!(caret_at > sel.find("#1").unwrap());
+        let line = render::caret_line(&sel).expect("a painted row");
+        let painted = sel.lines().nth(line).unwrap();
+        assert!(painted.contains("#2"), "wrong row painted: {painted:?}");
+        assert_eq!(
+            sel.lines()
+                .filter(|l| render::caret_line(l).is_some())
+                .count(),
+            1
+        );
     }
 }

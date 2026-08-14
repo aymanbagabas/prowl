@@ -16,6 +16,7 @@ pub const BLUE: Rgb = (137, 180, 250); // #89b4fa
 pub const LAVENDER: Rgb = (180, 190, 254); // #b4befe
 pub const PINK: Rgb = (245, 194, 231); // #f5c2e7 — "changed since last refresh" marker
 pub const OVERLAY: Rgb = (147, 153, 178); // #9399b2 — muted accent (help legend)
+pub const SURFACE: Rgb = (69, 71, 90); // #45475a — selected-row background
 
 /// Coarse CI/merge state of an open PR. It is no longer rendered directly (the
 /// row shows a mergeability glyph plus a check-run semaphore); it exists as the
@@ -172,6 +173,11 @@ pub fn review_meaning(s: ReviewState) -> &'static str {
 /// A truecolor foreground style.
 pub fn fg(rgb: Rgb) -> Style {
     Style::new().fg_color(Some(RgbColor(rgb.0, rgb.1, rgb.2).into()))
+}
+
+/// A truecolor background style.
+pub fn bg(rgb: Rgb) -> Style {
+    Style::new().bg_color(Some(RgbColor(rgb.0, rgb.1, rgb.2).into()))
 }
 
 /// The three lamps of the per-PR check semaphore.

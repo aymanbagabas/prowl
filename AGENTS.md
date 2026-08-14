@@ -82,8 +82,11 @@ everything else is testable modules:
   (cap/align the shared `TITLE` column so every table lines up and the whole
   view stays within `MAX_WIDTH` = 120 columns), headers (`header`, with an
   optional dim count badge and trailing note — the queue ETA), the `tabs`
-  view-switcher strip, the leading-column markers (`change_marker`, and the
-  `select_marker` navigation caret that overrides it on the selected row), the
+  view-switcher strip, the leading-column change marker (`change_marker`) and
+  the selected-row highlight (`select_row` marks a row's leading cell with the
+  selection background; `highlight_selected` then extends that background across
+  the whole rendered line, padded to the body's width — so the change marker
+  stays visible under it), the
   key-hint footer (`footer`, carrying the refresh
   interval and `enter open` / `/ search` hints), the `search_prompt` line (the
   `/` query with a block cursor + match count), help
@@ -99,7 +102,7 @@ everything else is testable modules:
   caret)`, which composes one screen of exactly `rows` lines — as much of the
   body as fits, blank padding, then the bottom block glued to the last rows.
   When the body is taller than what's left it scrolls to keep `caret`
-  (`caret_line`, which locates the selection caret by its unique styling)
+  (`caret_line`, which locates the selected row by its unique background)
   centered; when the bottom block alone overflows it is cut from the end, so the
   footer survives and the help legend is what goes. Each line erases its own
   tail and the last has no trailing newline, so painting a frame at `HOME` never
@@ -225,9 +228,11 @@ everything else is testable modules:
 - **Resilience:** a failed API call keeps the last good data, shows a dim error
   line, and does not ring.
 - **Navigation / open:** a lazy selection cursor (`nav`, watch only) — `None`
-  until the first movement key, then a `select_marker` caret on the chosen row
-  (it overrides the change marker, and works in the custom shipments renderer
-  too). `j`/`k` (or the arrows) move one row, `g`/`G` jump to first/last,
+  until the first movement key, then the chosen row is painted with the
+  selection background (`status::SURFACE`) for its full width — no caret glyph,
+  so the change marker still shows through (this works in the custom shipments
+  renderer too, whose 2-column gutter carries the same mark).
+  `j`/`k` (or the arrows) move one row, `g`/`G` jump to first/last,
   `Ctrl-D`/`Ctrl-U` half a page (sized from `term::height`); Enter opens the
   selected row — the PR, or a shipments release / the upcoming compare log — via
   `open::url`. Every row across all sections of the active view is one target
