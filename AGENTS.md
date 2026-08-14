@@ -129,9 +129,9 @@ everything else is testable modules:
   app integrations). The `Merge Queue` header also carries the queue-level ETA
   (`~11m to merge`, from `mergeQueue.nextEntryEstimatedTimeToMerge`) as a dim
   note. The
-  merged columns are `[mark] [ ] PR TITLE RELEASE MERGED` (no per-row glyph —
-  every row there is merged; the blank second column just keeps the tables
-  aligned), where `RELEASE` is the release
+  merged columns are `[mark] PR TITLE RELEASE MERGED` (no per-row glyph — every
+  row there is merged — and no blank stand-in for one either, so the rows start
+  at the same indent as every other section's), where `RELEASE` is the release
   that shipped the PR (a link to its release page) or `—` if not yet shipped,
   looked up from the `commits::ReleaseMap`.
 - `reviews.rs` — the Reviews view's rows/tables. `ReviewRow` (open: `glyph PR
