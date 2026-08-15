@@ -744,6 +744,9 @@ fn run_once_interactive(
         if screen.poll_event(Some(Duration::from_millis(60)))? {
             let mut aborted = false;
             while let Some(ev) = screen.try_read_event() {
+                // Reads are pure; observing keeps the screen's capability
+                // tracking (notably synchronized output) alive.
+                screen.observe_event(&ev)?;
                 if let Action::Quit = classify(&ev) {
                     aborted = true;
                 }
@@ -1433,6 +1436,11 @@ impl<'a> App<'a> {
     /// implies. While the search prompt is open every keystroke is text, so it is
     /// routed to [`Self::handle_search_event`] instead.
     fn handle_event(&mut self, ev: &Event) -> Result<Flow> {
+        // Reads are pure, so hand every event back to the screen: this is what
+        // keeps its capability tracking alive — notably the synchronized-output
+        // support reply, which makes each frame present atomically rather than
+        // tearing, and the cached terminal size.
+        self.screen.observe_event(ev)?;
         if self.ui.searching {
             return self.handle_search_event(ev);
         }
