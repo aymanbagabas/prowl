@@ -588,8 +588,10 @@ fn render_dashboard(
     pinned: bool,
 ) -> Result<Option<Position>> {
     let caret = if pinned {
-        // Fill the alternate screen, so the row math below is the terminal's.
-        screen.autoresize()?;
+        // The managed area already fills the alternate screen: it is fitted on
+        // entry and refitted on every resize event. Don't refit here — a
+        // `Screen::resize` forces a full clear + repaint, so doing it per frame
+        // would erase and redraw the whole screen every time, which is flicker.
         let (w, rows) = (screen.width().max(1), screen.height().max(1));
 
         // Body and bottom are painted into their own buffers because the frame
@@ -937,8 +939,8 @@ enum Action {
     Move(nav::Move),
     /// `Ctrl-Z`: suspend to the shell, then resume.
     Suspend,
-    /// The terminal was resized to these cell dimensions.
-    Resize(u16, u16),
+    /// The terminal was resized; the screen has already cached the new size.
+    Resize,
 }
 
 /// A keystroke while the search prompt is open (raw text input, unlike the
@@ -956,8 +958,8 @@ enum SearchAction {
     Esc,
     /// `Ctrl-Z`: suspend to the shell, then resume.
     Suspend,
-    /// The terminal was resized to these cell dimensions.
-    Resize(u16, u16),
+    /// The terminal was resized; the screen has already cached the new size.
+    Resize,
 }
 
 /// Classify an event into a normal-mode [`Action`]. In raw mode the signal keys
@@ -1003,7 +1005,7 @@ fn classify(ev: &Event) -> Action {
                 Action::None
             }
         }
-        Event::Resize(ws) => Action::Resize(ws.col, ws.row),
+        Event::Resize(_) => Action::Resize,
         _ => Action::None,
     }
 }
@@ -1028,7 +1030,7 @@ fn classify_search(ev: &Event) -> SearchAction {
             _ if k.matches("ctrl+z") => SearchAction::Suspend,
             _ => SearchAction::None,
         },
-        Event::Resize(ws) => SearchAction::Resize(ws.col, ws.row),
+        Event::Resize(_) => SearchAction::Resize,
         _ => SearchAction::None,
     }
 }
@@ -1276,6 +1278,9 @@ impl<'a> App<'a> {
             self.screen.resize((self.screen.width().max(1), 0));
             self.screen.render()?;
             self.screen.enter_alt_screen()?;
+            // Fit the managed area to the whole terminal, once. From here the
+            // size only changes on a resize event, so redraws stay diff-only.
+            self.screen.autoresize()?;
             self.in_alt = true;
         }
         Ok(())
@@ -1487,8 +1492,10 @@ impl<'a> App<'a> {
                 }
                 Flow::Continue
             }
-            Action::Resize(w, h) => {
-                self.screen.resize((w, h));
+            Action::Resize => {
+                // Refit the managed area to the new terminal size — the one
+                // place a full clear + repaint is warranted.
+                self.screen.autoresize()?;
                 self.repaint_last()?;
                 Flow::Continue
             }
@@ -1515,7 +1522,7 @@ impl<'a> App<'a> {
                 self.ui.searching = false;
             }
             SearchAction::Suspend => return self.suspend().map(|()| Flow::Continue),
-            SearchAction::Resize(w, h) => self.screen.resize((w, h)),
+            SearchAction::Resize => self.screen.autoresize()?,
             SearchAction::None => return Ok(Flow::Continue),
         }
         self.repaint_last()?;

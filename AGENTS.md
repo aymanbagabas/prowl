@@ -228,9 +228,13 @@ output before the dashboard takes over the screen. `stop` consumes the app and c
 raw mode). Because the caller always runs `stop`, the terminal is restored on
 every path — a clean quit, a `?`-operator error, or a failed first paint (`start`
 calls `stop` itself before bailing). Each frame is painted by `redraw` →
-`render_dashboard`, which pins the frame once `in_alt` is set: `autoresize` fits
-the managed area to the whole terminal, `paint_body` and `paint_bottom` each paint
-into their own `TextBuffer`, and `render::compose` places them. The loop uses `poll_event` with
+`render_dashboard`, which pins the frame once `in_alt` is set: `paint_body` and
+`paint_bottom` each paint into their own `TextBuffer`, and `render::compose`
+places them. The managed area is fitted to the terminal with `autoresize`
+**only** on entering the alt screen and on a resize event — never per frame,
+because `Screen::resize` forces a full clear + repaint, so refitting every frame
+erases and redraws the whole screen (visible flicker) instead of letting the
+renderer emit a diff. The loop uses `poll_event` with
 the interval as the timeout. Keys are classified into an `Action` (or, while the
 search prompt is open, a `SearchAction`) with `Key::matches`, which is
 **case-sensitive** — bindings must list both cases (`["r", "R"]`). `r`/`R`
