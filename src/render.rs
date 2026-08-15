@@ -284,31 +284,16 @@ pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     }
 }
 
-/// The painted width of `s`: one past the rightmost non-blank cell, over every
-/// row. What the selection bar spans, so it covers the dashboard's content
-/// rather than the full width of the terminal behind it.
-fn content_width(s: &impl Surface) -> u16 {
-    let b = s.bounds();
-    let mut w = 0;
-    for y in b.y..b.y + b.height {
-        for x in (w..b.width).rev() {
-            if s.cell(Position::new(x, y)).is_some_and(|c| !c.is_blank()) {
-                w = x + 1;
-                break;
-            }
-        }
-    }
-    w
-}
-
-/// Paint the selection background across row `y` of `s`, spanning its content:
-/// the row the navigation cursor is on is highlighted rather than marked with a
-/// glyph, so the leading column stays free and a row that is both changed and
-/// selected shows both. Only the background is set — every cell keeps its text,
-/// color and link — and it runs after the body is painted, so it covers a
-/// hand-laid-out section (the shipments) exactly as it covers the tables.
+/// Paint the selection background across the whole of row `y` — edge to edge,
+/// not just the painted text — so the row the navigation cursor is on reads as
+/// one solid bar. It replaces a caret glyph, leaving the leading column free, so
+/// a row that is both changed and selected shows both. Only the background is
+/// set: every cell keeps its text, color and link. Runs after the body is
+/// painted, so it covers a hand-laid-out section (the shipments) exactly as it
+/// covers the tables.
 pub fn highlight_row(s: &mut impl TextSurface, y: u16) {
-    for x in 0..content_width(s) {
+    let b = s.bounds();
+    for x in b.x..b.x + b.width {
         if let Some(cell) = s.cell_mut(Position::new(x, y)) {
             cell.style.bg = Some(status::SURFACE);
         }

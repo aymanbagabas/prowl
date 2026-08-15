@@ -1812,7 +1812,10 @@ mod tests {
                 .collect();
             (0..64u16)
                 .filter(|&y| {
-                    (0..w).any(|x| {
+                    // Edge to edge: the bar covers *every* cell of the row, so
+                    // it reads as one solid line rather than stopping at the
+                    // text — `all`, not `any`.
+                    (0..w).all(|x| {
                         canvas
                             .cell(uncurses::layout::Position::new(x, y))
                             .is_some_and(|c| c.style.bg == Some(crate::status::SURFACE))

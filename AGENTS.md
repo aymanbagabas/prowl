@@ -103,8 +103,8 @@ watch event loop); everything else is testable modules:
   the whole view stays within `MAX_WIDTH` = 120). Headers (with an optional dim
   count badge and trailing note — the queue ETA), the `tabs` view-switcher strip,
   the leading-column `change_marker` and the selected-row highlight
-  (`highlight_row` paints the selection background across one screen row, over
-  the body's content width, once the body is painted — so it covers the
+  (`highlight_row` paints the selection background edge to edge across one
+  screen row, once the body is painted — so it covers the
   hand-laid-out shipments section too, and the change marker stays visible
   underneath instead of being overwritten by a caret), the key-hint footer
   (carrying the
@@ -281,7 +281,7 @@ opens the selected row, `y`/`Y` copy links, the movement keys drive the cursor,
   line, and does not ring.
 - **Navigation / open:** a lazy selection cursor (`nav`, watch only) — `None`
   until the first movement key, then the chosen row is painted with the
-  selection background (`status::SURFACE`) across the body's content width
+  selection background (`status::SURFACE`) edge to edge across the full width
   (`render::highlight_row`, applied once the body is painted) — no caret glyph,
   so the change marker still shows through, and the custom shipments painter is
   covered for free. `j`/`k` (or the arrows) move one row, `g`/`G` jump to
