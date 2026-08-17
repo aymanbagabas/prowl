@@ -943,8 +943,8 @@ enum Action {
     Move(nav::Move),
     /// `Ctrl-Z`: suspend to the shell, then resume.
     Suspend,
-    /// The terminal was resized; the screen has already cached the new size.
-    Resize,
+    /// The terminal was resized to these cell dimensions.
+    Resize(u16, u16),
 }
 
 /// A keystroke while the search prompt is open (raw text input, unlike the
@@ -962,8 +962,8 @@ enum SearchAction {
     Esc,
     /// `Ctrl-Z`: suspend to the shell, then resume.
     Suspend,
-    /// The terminal was resized; the screen has already cached the new size.
-    Resize,
+    /// The terminal was resized to these cell dimensions.
+    Resize(u16, u16),
 }
 
 /// Classify an event into a normal-mode [`Action`]. In raw mode the signal keys
@@ -1009,7 +1009,7 @@ fn classify(ev: &Event) -> Action {
                 Action::None
             }
         }
-        Event::Resize(_) => Action::Resize,
+        Event::Resize(ws) => Action::Resize(ws.col, ws.row),
         _ => Action::None,
     }
 }
@@ -1034,7 +1034,7 @@ fn classify_search(ev: &Event) -> SearchAction {
             _ if k.matches("ctrl+z") => SearchAction::Suspend,
             _ => SearchAction::None,
         },
-        Event::Resize(_) => SearchAction::Resize,
+        Event::Resize(ws) => SearchAction::Resize(ws.col, ws.row),
         _ => SearchAction::None,
     }
 }
@@ -1282,8 +1282,10 @@ impl<'a> App<'a> {
             self.screen.resize((self.screen.width().max(1), 0));
             self.screen.render()?;
             self.screen.enter_alt_screen()?;
-            // Fit the managed area to the whole terminal, once. From here the
-            // size only changes on a resize event, so redraws stay diff-only.
+            // The one place `autoresize` is the right tool: we now own the
+            // whole window, and it is the only call that queries the terminal
+            // for its row count — which we need, having just collapsed the
+            // managed area to zero rows. Resize events carry their own size.
             self.screen.autoresize()?;
             self.in_alt = true;
         }
@@ -1501,10 +1503,13 @@ impl<'a> App<'a> {
                 }
                 Flow::Continue
             }
-            Action::Resize => {
-                // Refit the managed area to the new terminal size — the one
-                // place a full clear + repaint is warranted.
-                self.screen.autoresize()?;
+            Action::Resize(w, h) => {
+                // The event already carries the new size, so resize to it
+                // directly rather than re-querying the terminal. Only the alt
+                // screen is the whole window: inline (the loading frame) the
+                // managed area keeps its own height and just follows the width.
+                let h = if self.in_alt { h } else { self.screen.height() };
+                self.screen.resize((w, h));
                 self.repaint_last()?;
                 Flow::Continue
             }
@@ -1531,7 +1536,9 @@ impl<'a> App<'a> {
                 self.ui.searching = false;
             }
             SearchAction::Suspend => return self.suspend().map(|()| Flow::Continue),
-            SearchAction::Resize => self.screen.autoresize()?,
+            // The prompt only opens while watching, so we own the alt screen
+            // and the frame is the whole window.
+            SearchAction::Resize(w, h) => self.screen.resize((w, h)),
             SearchAction::None => return Ok(Flow::Continue),
         }
         self.repaint_last()?;

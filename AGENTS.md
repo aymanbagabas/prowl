@@ -230,12 +230,19 @@ every path — a clean quit, a `?`-operator error, or a failed first paint (`sta
 calls `stop` itself before bailing). Each frame is painted by `redraw` →
 `render_dashboard`, which pins the frame once `in_alt` is set: `paint_body` and
 `paint_bottom` each paint into their own `TextBuffer`, and `render::compose`
-places them. The managed area is fitted to the terminal with `autoresize`
-**only** on entering the alt screen and on a resize event — never per frame,
-which would re-query the terminal size on every redraw (and, before uncurses
-0.0.2, forced a clear + full repaint: the screen erased and rewrote itself every
-frame instead of the renderer emitting a diff, which is what flicker looks
-like). Every input event is handed back with `Screen::observe_event`: reads are
+places them. The managed area is **never** refitted per frame — that would
+re-query the terminal on every redraw (and, before uncurses 0.0.2, forced a
+clear + full repaint: the screen erased and rewrote itself every frame instead
+of the renderer emitting a diff, which is what flicker looks like). It is sized
+in exactly two places. `autoresize` is called once, in `enter_alt`: it is the
+only call that queries the terminal for its row count, which is needed right
+after the inline frame is collapsed to zero rows, and it fits the area to the
+whole window — correct precisely because we just took the alt screen. A resize
+event instead carries its own dimensions, so `Action::Resize` / `SearchAction::
+Resize` call `Screen::resize` with them and skip the query; inline (the loading
+frame, before `in_alt`) the reported height is the *window's*, so the managed
+area keeps its own height and follows only the width. Every input event is
+handed back with `Screen::observe_event`: reads are
 pure, so that is what keeps capability tracking alive — notably the DECRPM 2026
 reply that enables **synchronized output**, so a frame that clears first (a
 resize) is presented atomically rather than seen half-drawn. The loop uses
