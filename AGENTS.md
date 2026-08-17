@@ -232,9 +232,14 @@ calls `stop` itself before bailing). Each frame is painted by `redraw` →
 `paint_bottom` each paint into their own `TextBuffer`, and `render::compose`
 places them. The managed area is fitted to the terminal with `autoresize`
 **only** on entering the alt screen and on a resize event — never per frame,
-because `Screen::resize` forces a full clear + repaint, so refitting every frame
-erases and redraws the whole screen (visible flicker) instead of letting the
-renderer emit a diff. The loop uses `poll_event` with
+which would re-query the terminal size on every redraw (and, before uncurses
+0.0.2, forced a clear + full repaint: the screen erased and rewrote itself every
+frame instead of the renderer emitting a diff, which is what flicker looks
+like). Every input event is handed back with `Screen::observe_event`: reads are
+pure, so that is what keeps capability tracking alive — notably the DECRPM 2026
+reply that enables **synchronized output**, so a frame that clears first (a
+resize) is presented atomically rather than seen half-drawn. The loop uses
+`poll_event` with
 the interval as the timeout. Keys are classified into an `Action` (or, while the
 search prompt is open, a `SearchAction`) with `Key::matches`, which is
 **case-sensitive** — bindings must list both cases (`["r", "R"]`). `r`/`R`

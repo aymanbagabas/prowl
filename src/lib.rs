@@ -589,9 +589,10 @@ fn render_dashboard(
 ) -> Result<Option<Position>> {
     let caret = if pinned {
         // The managed area already fills the alternate screen: it is fitted on
-        // entry and refitted on every resize event. Don't refit here — a
-        // `Screen::resize` forces a full clear + repaint, so doing it per frame
-        // would erase and redraw the whole screen every time, which is flicker.
+        // entry and refitted on every resize event, so there is nothing to do
+        // per frame. Refitting here would only re-query the terminal size on
+        // every redraw (and, before uncurses 0.0.2, force a clear + full
+        // repaint — the flicker this replaced).
         let (w, rows) = (screen.width().max(1), screen.height().max(1));
 
         // Body and bottom are painted into their own buffers because the frame
