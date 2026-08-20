@@ -25,9 +25,9 @@ flags the changed rows (the bell and change markers track the Mine view only).
 The interactive watch runs on the
 [**uncurses**](https://github.com/aymanbagabas/uncurses) toolkit with an event
 loop: it shows an *inline* `Loading...` frame, then enters the **alternate
-screen** [`Screen`] once the first fetch lands (or immediately when there's a
+screen** once the first fetch lands (or immediately when there's a
 cache to paint), where that bottom block is **pinned** to the last rows and the
-sections scroll under it. Interactive `--once` uses an *inline* `Screen` instead:
+sections scroll under it. Interactive `--once` uses an *inline* surface instead:
 a `Loading...` frame while the fetch runs (abortable with `q`), then the dashboard
 is left in the terminal. Piped/non-TTY output is plain text printed straight to
 stdout, so the dashboard stays pipe-friendly and URLs can be OSC-8 hyperlinks.
@@ -43,8 +43,9 @@ stdout, so the dashboard stays pipe-friendly and URLs can be OSC-8 hyperlinks.
   → OS keyring / chmod-600 file → OAuth **device flow** (interactive). The OAuth
   App client id is public and embedded. `--login` forces the device flow.
 - **The terminal toolkit is `uncurses`** (the author's own low-level library):
-  its `style::Style` carries SGR + the OSC-8 link, the `Screen` facade owns raw
-  mode / the alternate screen / input / teardown, and `text` provides width math.
+  its `style::Style` carries SGR + the OSC-8 link, `Program` owns raw mode / the
+  alternate screen / input / teardown while `Screen` is the renderer it draws
+  through (`program.screen_mut()`), and `text` provides width math.
   Don't reach for a higher-level TUI framework (ratatui, etc.): the watch is a
   full-repaint dashboard, and one-shot output must degrade to plain piped text.
 - **Styling:** built on `uncurses::style::Style` (SGR incl. 24-bit truecolor;
@@ -203,18 +204,18 @@ sized to its content (a generous `height_bound` + `bottom_bound`, then cropped t
 the painted height), and `encode_with`s it to the terminal's output (`Terminal::output`)
 using the **detected** color `Profile` (`Profile::detect_from`), so it's colored on
 a TTY and plain when piped. Interactive `--once` instead runs `run_once_interactive`:
-an *inline* `Screen` (raw mode, hidden cursor) shows a `Loading...` frame while the
+an *inline* `Program` (raw mode, hidden cursor) shows a `Loading...` frame while the
 fetch runs on a background thread, so keystrokes don't echo and `q`/`Esc`/`Ctrl-C`
 aborts mid-fetch; on success the dashboard replaces the frame and is left inline
-(`Screen::finish` doesn't wipe an inline surface). Otherwise the same `Terminal` is
-moved into `App::start` → `Screen::new(terminal)`. The watch redraw and the inline
+(`Program::finish` doesn't wipe an inline surface). Otherwise the same `Terminal` is
+moved into `App::start` → `Program::new(terminal)`. The watch redraw and the inline
 one-shot frame share `render_dashboard`, which has two layouts: **pinned** (the
 watch, in the alternate screen) fills the terminal, scrolls the body under a
 bottom block glued to the last rows, and **unpinned** (the inline one-shot) sizes
 the surface to the content and crops to the painted height.
 
 The interactive watch is `lib.rs::App`, following the uncurses example **`App`
-pattern**: the struct owns the `uncurses::Screen` plus all dashboard state, and
+pattern**: the struct owns the `uncurses::Program` plus all dashboard state, and
 `run()` does `let mut app = App::start(terminal, ...)?; let result = app.run();
 app.stop()?; result`. `start` builds the screen from the `Terminal` and brings it
 up (raw mode, hidden cursor, keeping the terminal's detected color profile), then
@@ -224,7 +225,7 @@ straight away), otherwise an **inline** `Loading...` frame. `run` resolves
 key. The first live paint calls `enter_alt` (once), which drops the inline frame to
 zero rows and switches to the alt screen — so loading looks like ordinary command
 output before the dashboard takes over the screen. `stop` consumes the app and calls
-**`Screen::finish`** (the idiomatic teardown: exit alt-screen, show cursor, leave
+**`Program::finish`** (the idiomatic teardown: exit alt-screen, show cursor, leave
 raw mode). Because the caller always runs `stop`, the terminal is restored on
 every path — a clean quit, a `?`-operator error, or a failed first paint (`start`
 calls `stop` itself before bailing). Each frame is painted by `redraw` →
@@ -241,12 +242,13 @@ whole window — correct precisely because we just took the alt screen. A resize
 event instead carries its own dimensions, so `Action::Resize` / `SearchAction::
 Resize` call `Screen::resize` with them and skip the query; inline (the loading
 frame, before `in_alt`) the reported height is the *window's*, so the managed
-area keeps its own height and follows only the width. Every input event is
-handed back with `Screen::observe_event`: reads are
-pure, so that is what keeps capability tracking alive — notably the DECRPM 2026
-reply that enables **synchronized output**, so a frame that clears first (a
-resize) is presented atomically rather than seen half-drawn. The loop uses
-`poll_event` with
+area keeps its own height and follows only the width. `Program::init` does not
+probe the terminal, so `start` calls **`query_capabilities`**: reading an event
+records the reply as it passes through, and the DECRPM 2026 answer is what
+enables **synchronized output**, so a frame that clears first (a resize) is
+presented atomically rather than seen half-drawn. The same query also adopts
+grapheme clustering and in-band resize where the terminal supports them. The
+loop uses `poll_event` with
 the interval as the timeout. Keys are classified into an `Action` (or, while the
 search prompt is open, a `SearchAction`) with `Key::matches`, which is
 **case-sensitive** — bindings must list both cases (`["r", "R"]`). `r`/`R`
@@ -334,7 +336,7 @@ opens the selected row, `y`/`Y` copy links, the movement keys drive the cursor,
   but stays silent (no startup bell). With no cache it shows an inline
   `Loading...` frame and enters the alt screen only once the first fetch lands.
   `--no-cache` skips both read and write.
-- **Terminal:** the watch runs on a `uncurses::Screen` in the alternate screen
+- **Terminal:** the watch runs on a `uncurses::Program` in the alternate screen
   with the cursor hidden (it reappears only in the search prompt); raw mode means stray keystrokes never garble the
   dashboard or spill into the shell. `r`/`R` forces a refresh now; `Tab` switches
   view; `?` toggles the help legend (contextual to the active view —
@@ -359,12 +361,12 @@ opens the selected row, `y`/`Y` copy links, the movement keys drive the cursor,
   navigation, search, `Tab`, `?`, resize and suspend stay live mid-refresh and
   **quit is instant** (a quit abandons the in-flight request, which is reaped at
   process exit). The terminal is restored on every exit path by `App::stop`
-  (`Screen::finish`), which the caller always runs after `App::run`.
-- **Interactive `--once`:** `run_once_interactive` brings up an *inline* `Screen`
+  (`Program::finish`), which the caller always runs after `App::run`.
+- **Interactive `--once`:** `run_once_interactive` brings up an *inline* `Program`
   (raw mode, hidden cursor) and paints a `Loading...` frame while the fetch runs on
   a background thread, so keystrokes don't echo and `q`/`Esc`/`Ctrl-C` aborts the
   fetch instantly. On success the dashboard replaces the frame and is left inline in
-  the terminal; on abort the frame is wiped. `Screen::finish` restores the terminal
+  the terminal; on abort the frame is wiped. `Program::finish` restores the terminal
   on every path. Piped/non-TTY output keeps the plain `render_once` encode path.
 
 ## The GraphQL queries + REST (see `model.rs` / `commits.rs`)

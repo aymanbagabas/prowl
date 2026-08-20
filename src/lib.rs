@@ -53,6 +53,7 @@ use uncurses::buffer::{Bounded, SurfaceMut, TextBuffer};
 use uncurses::color::{Color, Profile};
 use uncurses::event::{Event, KeyCode, KeyModifiers};
 use uncurses::layout::Position;
+use uncurses::program::Program;
 use uncurses::screen::Screen;
 use uncurses::style::Style;
 use uncurses::terminal::{Stdin, Stdout, Terminal};
@@ -549,7 +550,7 @@ fn height_bound(s: &Sections, ui: &Ui) -> u16 {
 /// Paint the one-row `Loading...` startup frame (a single dim line) and render it.
 /// Shared by the watch's first paint when there's no cache and by interactive
 /// `--once`, so both show the identical loading frame.
-fn paint_loading(screen: &mut Screen<Stdin, Stdout>) -> Result<()> {
+fn paint_loading(screen: &mut Screen<Stdout>) -> Result<()> {
     screen.resize((screen.width().max(1), 1));
     screen.clear();
     render::paint_dim(screen, "Loading...", 0);
@@ -578,7 +579,7 @@ fn bottom_bound(ui: &Ui) -> u16 {
 /// Returns the search caret's resting cell, if the prompt is capturing.
 #[allow(clippy::too_many_arguments)]
 fn render_dashboard(
-    screen: &mut Screen<Stdin, Stdout>,
+    screen: &mut Screen<Stdout>,
     sections: &Sections,
     ui: &Ui,
     changes: &Changes,
@@ -700,13 +701,16 @@ fn run_once_interactive(
     client: &Client,
     repo: &Repo,
 ) -> Result<()> {
-    let mut screen = Screen::new(terminal)?;
-    screen.init()?;
-    screen.hide_cursor()?;
+    let mut program = Program::new(terminal)?;
+    program.init()?;
+    // `init` no longer probes the terminal, so ask: the reply is what lets the
+    // renderer bracket each frame in synchronized output.
+    program.query_capabilities(&[])?;
+    program.hide_cursor()?;
 
     // Inline loading frame; raw mode swallows keystrokes so nothing echoes into
     // the output while we wait.
-    paint_loading(&mut screen)?;
+    paint_loading(program.screen_mut())?;
 
     // Fetch off-thread so `q` stays live during network I/O. `me` and the
     // default branch are resolved here too, so even the first round-trip never
@@ -742,12 +746,11 @@ fn run_once_interactive(
                 break Some(Err(anyhow::anyhow!("fetch worker stopped unexpectedly")));
             }
         }
-        if screen.poll_event(Some(Duration::from_millis(60)))? {
+        if program.poll_event(Some(Duration::from_millis(60)))? {
             let mut aborted = false;
-            while let Some(ev) = screen.try_read_event() {
-                // Reads are pure; observing keeps the screen's capability
-                // tracking (notably synchronized output) alive.
-                screen.observe_event(&ev)?;
+            // Reading observes the event, so capability replies (synchronized
+            // output) are tracked as they pass through.
+            while let Some(ev) = program.try_read_event()? {
                 if let Action::Quit = classify(&ev) {
                     aborted = true;
                 }
@@ -762,7 +765,7 @@ fn run_once_interactive(
         Some(Ok(sections)) => {
             // Replace the loading frame with the dashboard, then leave it inline.
             render_dashboard(
-                &mut screen,
+                program.screen_mut(),
                 &sections,
                 &Ui::once(cli),
                 &Changes::default(),
@@ -771,21 +774,21 @@ fn run_once_interactive(
                 cli.ascii,
                 false,
             )?;
-            screen.finish()?;
+            program.finish()?;
             if !cli.no_cache {
                 cache::save(repo, &sections);
             }
             Ok(())
         }
         Some(Err(e)) => {
-            screen.finish()?; // restore the terminal before surfacing the error
+            program.finish()?; // restore the terminal before surfacing the error
             Err(e)
         }
         None => {
             // Aborted: wipe the loading frame so nothing is left behind.
-            screen.clear();
-            screen.render()?;
-            screen.finish()?;
+            program.screen_mut().clear();
+            program.screen_mut().render()?;
+            program.finish()?;
             Ok(())
         }
     }
@@ -1168,7 +1171,7 @@ pub fn run() -> Result<()> {
 /// pressed), and `stop` tears it back down with `Screen::finish`. The caller
 /// always calls `stop`, so the terminal is restored on every path.
 struct App<'a> {
-    screen: Screen<Stdin, Stdout>,
+    program: Program<Stdin, Stdout>,
     cli: &'a Cli,
     client: &'a Client,
     repo: &'a Repo,
@@ -1214,13 +1217,17 @@ impl<'a> App<'a> {
         client: &'a Client,
         repo: &'a Repo,
     ) -> Result<Self> {
-        let mut screen = Screen::new(terminal)?;
-        screen.init()?;
-        screen.hide_cursor()?;
+        let mut program = Program::new(terminal)?;
+        program.init()?;
+        // `init` no longer probes the terminal, so ask: the reply is what lets
+        // the renderer bracket each frame in synchronized output, which is what
+        // keeps a frame that clears first (a resize) from being seen half-drawn.
+        program.query_capabilities(&[])?;
+        program.hide_cursor()?;
 
         let mut app = App {
             eta: timefmt::eta(cli.interval.dur),
-            screen,
+            program,
             cli,
             client,
             repo,
@@ -1269,7 +1276,7 @@ impl<'a> App<'a> {
                 self.enter_alt()?;
                 self.redraw(&Changes::default())?;
             }
-            None => paint_loading(&mut self.screen)?,
+            None => paint_loading(self.program.screen_mut())?,
         }
         Ok(())
     }
@@ -1279,14 +1286,15 @@ impl<'a> App<'a> {
     /// screen leaves the terminal as it was before prowl ran.
     fn enter_alt(&mut self) -> Result<()> {
         if !self.in_alt {
-            self.screen.resize((self.screen.width().max(1), 0));
-            self.screen.render()?;
-            self.screen.enter_alt_screen()?;
+            let w = self.program.screen().width().max(1);
+            self.program.screen_mut().resize((w, 0));
+            self.program.screen_mut().render()?;
+            self.program.enter_alt_screen()?;
             // The one place `autoresize` is the right tool: we now own the
             // whole window, and it is the only call that queries the terminal
             // for its row count — which we need, having just collapsed the
             // managed area to zero rows. Resize events carry their own size.
-            self.screen.autoresize()?;
+            self.program.autoresize()?;
             self.in_alt = true;
         }
         Ok(())
@@ -1300,7 +1308,7 @@ impl<'a> App<'a> {
         let mut buf = None;
         let sections = self.ui.shown(good, &mut buf);
         let caret = render_dashboard(
-            &mut self.screen,
+            self.program.screen_mut(),
             sections,
             &self.ui,
             changes,
@@ -1316,9 +1324,9 @@ impl<'a> App<'a> {
         let want = caret.is_some();
         if want != self.cursor_shown {
             if want {
-                self.screen.show_cursor()?;
+                self.program.show_cursor()?;
             } else {
-                self.screen.hide_cursor()?;
+                self.program.hide_cursor()?;
             }
             self.cursor_shown = want;
         }
@@ -1342,7 +1350,7 @@ impl<'a> App<'a> {
     /// idiomatic teardown: it exits the alternate screen, shows the cursor, and
     /// leaves raw mode.
     fn stop(self) -> Result<()> {
-        self.screen.finish()?;
+        self.program.finish()?;
         Ok(())
     }
 
@@ -1405,8 +1413,8 @@ impl<'a> App<'a> {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(Flow::Continue),
             }
-            if self.screen.poll_event(Some(Duration::from_millis(60)))? {
-                while let Some(ev) = self.screen.try_read_event() {
+            if self.program.poll_event(Some(Duration::from_millis(60)))? {
+                while let Some(ev) = self.program.try_read_event()? {
                     if let Flow::Quit = self.handle_event(&ev)? {
                         return Ok(Flow::Quit);
                     }
@@ -1420,10 +1428,10 @@ impl<'a> App<'a> {
     fn wait_interval(&mut self) -> Result<Flow> {
         let deadline = Instant::now() + self.cli.interval.dur;
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-            if !self.screen.poll_event(Some(remaining))? {
+            if !self.program.poll_event(Some(remaining))? {
                 break; // timed out: scheduled refresh
             }
-            while let Some(ev) = self.screen.try_read_event() {
+            while let Some(ev) = self.program.try_read_event()? {
                 match self.handle_event(&ev)? {
                     Flow::Quit => return Ok(Flow::Quit),
                     Flow::Refresh => return Ok(Flow::Continue), // refresh now
@@ -1439,11 +1447,6 @@ impl<'a> App<'a> {
     /// implies. While the search prompt is open every keystroke is text, so it is
     /// routed to [`Self::handle_search_event`] instead.
     fn handle_event(&mut self, ev: &Event) -> Result<Flow> {
-        // Reads are pure, so hand every event back to the screen: this is what
-        // keeps its capability tracking alive — notably the synchronized-output
-        // support reply, which makes each frame present atomically rather than
-        // tearing, and the cached terminal size.
-        self.screen.observe_event(ev)?;
         if self.ui.searching {
             return self.handle_search_event(ev);
         }
@@ -1508,8 +1511,12 @@ impl<'a> App<'a> {
                 // directly rather than re-querying the terminal. Only the alt
                 // screen is the whole window: inline (the loading frame) the
                 // managed area keeps its own height and just follows the width.
-                let h = if self.in_alt { h } else { self.screen.height() };
-                self.screen.resize((w, h));
+                let h = if self.in_alt {
+                    h
+                } else {
+                    self.program.screen().height()
+                };
+                self.program.screen_mut().resize((w, h));
                 self.repaint_last()?;
                 Flow::Continue
             }
@@ -1538,7 +1545,7 @@ impl<'a> App<'a> {
             SearchAction::Suspend => return self.suspend().map(|()| Flow::Continue),
             // The prompt only opens while watching, so we own the alt screen
             // and the frame is the whole window.
-            SearchAction::Resize(w, h) => self.screen.resize((w, h)),
+            SearchAction::Resize(w, h) => self.program.screen_mut().resize((w, h)),
             SearchAction::None => return Ok(Flow::Continue),
         }
         self.repaint_last()?;
@@ -1551,8 +1558,8 @@ impl<'a> App<'a> {
     fn suspend(&mut self) -> Result<()> {
         #[cfg(unix)]
         {
-            self.screen.suspend()?;
-            self.screen.resume()?;
+            self.program.suspend()?;
+            self.program.resume()?;
         }
         self.repaint_last()
     }
@@ -1567,7 +1574,7 @@ impl<'a> App<'a> {
 
     /// The half-page movement step: half the terminal window's rows.
     fn half_page(&self) -> usize {
-        self.screen
+        self.program
             .window_cells()
             .map_or(10, |s| usize::from(s.height / 2).max(1))
     }
@@ -1667,7 +1674,7 @@ impl<'a> App<'a> {
         self.redraw(&changes)?;
 
         if self.armed && bell && !self.cli.no_bell {
-            let _ = self.screen.beep();
+            let _ = self.program.beep();
         }
         self.armed = true;
         if !self.cli.no_cache
