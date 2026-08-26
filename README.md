@@ -87,7 +87,8 @@ mergeability glyphs for your PRs, review glyphs for your reviews.
 Move the selection cursor through the listed PRs and releases with `j`/`k` (or
 `↓`/`↑`), `g`/`G` for the first/last row, and `Ctrl-D`/`Ctrl-U` to jump half a
 page; press `Enter` to open the highlighted PR (or release) in your browser. The
-cursor only appears once you start moving it.
+cursor only appears once you start moving it, and stays on the same URL when the
+terminal is resized if that row remains visible.
 
 Press `y` to copy the selected row's link, or `Y` to copy every link in the
 section the cursor is in — your open PRs, the merge queue, the merged list, your

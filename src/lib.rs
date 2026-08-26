@@ -1898,6 +1898,7 @@ impl<'a> App<'a> {
                 Flow::Continue
             }
             Action::Resize(w, h) => {
+                let selected = self.selected_url();
                 // The event already carries the new size, so resize to it
                 // directly rather than re-querying the terminal. Only the alt
                 // screen is the whole window: inline (the loading frame) the
@@ -1908,7 +1909,7 @@ impl<'a> App<'a> {
                     self.program.screen().height()
                 };
                 self.program.screen_mut().resize((w, h));
-                self.ui.selected = None;
+                self.restore_selection(selected.as_deref());
                 self.repaint_last()?;
                 Flow::Continue
             }
@@ -1989,6 +1990,29 @@ impl<'a> App<'a> {
         .visible
     }
 
+    fn selected_url(&self) -> Option<String> {
+        let selected = self.ui.selected?;
+        self.last_good.as_ref().and_then(|good| {
+            let mut filtered = None;
+            let shown = self.ui.shown(good, &mut filtered);
+            let visible = self.visible_sections(shown);
+            nav::targets_visible(self.ui.view, shown, &self.ui.search, visible)
+                .get(selected)
+                .map(|url| (*url).to_string())
+        })
+    }
+
+    fn restore_selection(&mut self, url: Option<&str>) {
+        self.ui.selected = url.and_then(|url| {
+            self.last_good.as_ref().and_then(|good| {
+                let mut filtered = None;
+                let shown = self.ui.shown(good, &mut filtered);
+                let visible = self.visible_sections(shown);
+                nav::target_index(self.ui.view, shown, &self.ui.search, visible, url)
+            })
+        });
+    }
+
     /// The half-page movement step: half the terminal window's rows.
     fn half_page(&self) -> usize {
         self.program
@@ -1998,18 +2022,7 @@ impl<'a> App<'a> {
 
     /// `y`: copy the selected row's link. A no-op without a selection or data.
     fn copy_selected(&mut self) -> Result<()> {
-        let Some(sel) = self.ui.selected else {
-            return Ok(());
-        };
-        let url = self.last_good.as_ref().and_then(|good| {
-            let mut filtered = None;
-            let shown = self.ui.shown(good, &mut filtered);
-            let visible = self.visible_sections(shown);
-            nav::targets_visible(self.ui.view, shown, &self.ui.search, visible)
-                .get(sel)
-                .map(|u| (*u).to_string())
-        });
-        match url {
+        match self.selected_url() {
             Some(url) => self.copy(&url, 1),
             None => Ok(()),
         }
@@ -2062,18 +2075,9 @@ impl<'a> App<'a> {
     /// Open the selected row's URL in the browser. A failure becomes the dim
     /// error line; a no-op (no selection, no data) leaves the screen as is.
     fn open_selected(&mut self) -> Result<()> {
-        let Some(sel) = self.ui.selected else {
+        let Some(url) = self.selected_url() else {
             return Ok(());
         };
-        let url = self.last_good.as_ref().and_then(|good| {
-            let mut filtered = None;
-            let shown = self.ui.shown(good, &mut filtered);
-            let visible = self.visible_sections(shown);
-            nav::targets_visible(self.ui.view, shown, &self.ui.search, visible)
-                .get(sel)
-                .map(|u| (*u).to_string())
-        });
-        let Some(url) = url else { return Ok(()) };
         if let Err(e) = open::url(&url) {
             self.last_status = format!("error: open failed: {e}");
             self.ui.selected = None;

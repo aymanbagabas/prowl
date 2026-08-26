@@ -164,6 +164,18 @@ pub(crate) fn targets_visible<'a>(
     groups(view, s, query, visible).concat()
 }
 
+pub(crate) fn target_index(
+    view: View,
+    s: &Sections,
+    query: &str,
+    visible: Visibility,
+    url: &str,
+) -> Option<usize> {
+    targets_visible(view, s, query, visible)
+        .iter()
+        .position(|target| *target == url)
+}
+
 /// Every target of the section containing the `index`-th target — what `Y`
 /// copies. Empty sections hold no index, so passing 0 with no selection yields
 /// the first non-empty section; an out-of-range index yields nothing.
@@ -435,6 +447,14 @@ mod tests {
         assert_eq!(
             section_at_visible(View::Mine, &s, "", 0, visible),
             vec!["https://pr/1"]
+        );
+        assert_eq!(
+            target_index(View::Mine, &s, "", visible, "https://pr/1"),
+            Some(0)
+        );
+        assert_eq!(
+            target_index(View::Mine, &s, "", visible, "https://q/2"),
+            None
         );
     }
 

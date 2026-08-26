@@ -321,7 +321,9 @@ still performs all teardown through `finish`.
   first/last,
   `Ctrl-D`/`Ctrl-U` half a page (sized from the screen's `window_cells`); Enter
   opens the selected row — the PR, or a shipments release / the upcoming compare
-  log — via `open::url`. Every row across all sections of the active view is one
+  log — via `open::url`. Resize preserves the selected URL when it remains
+  visible and clears selection when responsive hiding removes it. Every row
+  across all sections of the active view is one
   target (`nav::targets_visible`, in render order); switching views drops the cursor and
   a refresh `clamp`s it. `--once`/piped output has no selection.
 - **Copy:** `y` copies the selected row's link, `Y` every link of the section the
