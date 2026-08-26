@@ -963,6 +963,7 @@ enum Action {
 
 /// A keystroke while the search prompt is open (raw text input, unlike the
 /// semantic [`Action`]s of normal mode).
+#[derive(Debug, PartialEq, Eq)]
 enum SearchAction {
     /// Ignore (an unbound key, or a non-input event).
     None,
@@ -974,6 +975,8 @@ enum SearchAction {
     Enter,
     /// Esc: clear the filter and leave the prompt.
     Esc,
+    /// `Ctrl-C`: quit, including while the prompt is open.
+    Quit,
     /// `Ctrl-Z`: suspend to the shell, then resume.
     Suspend,
     /// The terminal was resized to these cell dimensions.
@@ -1029,25 +1032,31 @@ fn classify(ev: &Event) -> Action {
 }
 
 /// Classify an event while the search prompt is open: printable characters
-/// extend the query, everything else is an edit/exit key. Quit keys are not
-/// bound here — `q` is a searchable character, and Esc closes the prompt.
+/// extend the query, everything else is an edit/exit key. `q` remains a
+/// searchable character, while `Ctrl-C` quits and Esc closes the prompt.
 fn classify_search(ev: &Event) -> SearchAction {
     match ev {
-        Event::KeyPress(k) => match k.code {
-            KeyCode::Char(c)
-                if !k
-                    .modifiers
-                    .intersects(KeyModifiers::CTRL | KeyModifiers::ALT) =>
-            {
-                SearchAction::Char(c)
+        Event::KeyPress(k) => {
+            if k.matches("ctrl+c") {
+                SearchAction::Quit
+            } else {
+                match k.code {
+                    KeyCode::Char(c)
+                        if !k
+                            .modifiers
+                            .intersects(KeyModifiers::CTRL | KeyModifiers::ALT) =>
+                    {
+                        SearchAction::Char(c)
+                    }
+                    KeyCode::Space => SearchAction::Char(' '),
+                    KeyCode::Backspace => SearchAction::Backspace,
+                    KeyCode::Enter => SearchAction::Enter,
+                    KeyCode::Escape => SearchAction::Esc,
+                    _ if k.matches("ctrl+z") => SearchAction::Suspend,
+                    _ => SearchAction::None,
+                }
             }
-            KeyCode::Space => SearchAction::Char(' '),
-            KeyCode::Backspace => SearchAction::Backspace,
-            KeyCode::Enter => SearchAction::Enter,
-            KeyCode::Escape => SearchAction::Esc,
-            _ if k.matches("ctrl+z") => SearchAction::Suspend,
-            _ => SearchAction::None,
-        },
+        }
         Event::Resize(ws) => SearchAction::Resize(ws.col, ws.row),
         _ => SearchAction::None,
     }
@@ -1554,6 +1563,7 @@ impl<'a> App<'a> {
                 self.ui.search.clear();
                 self.ui.searching = false;
             }
+            SearchAction::Quit => return Ok(Flow::Quit),
             SearchAction::Suspend => return self.suspend().map(|()| Flow::Continue),
             // The prompt only opens while watching, so we own the alt screen
             // and the frame is the whole window.
@@ -1755,6 +1765,17 @@ mod tests {
         assert!(ascii_mode(false, Profile::Disabled));
         assert!(ascii_mode(true, Profile::TrueColor));
         assert!(!ascii_mode(false, Profile::TrueColor));
+    }
+
+    #[test]
+    fn ctrl_c_quits_while_search_is_open() {
+        use uncurses::event::Key;
+
+        let ctrl_c = Event::KeyPress(Key::new(KeyCode::Char('c'), KeyModifiers::CTRL));
+        let q = Event::KeyPress(Key::new(KeyCode::Char('q'), KeyModifiers::empty()));
+
+        assert_eq!(classify_search(&ctrl_c), SearchAction::Quit);
+        assert_eq!(classify_search(&q), SearchAction::Char('q'));
     }
 
     /// A `Ui` for the given view with nothing selected and no filter.
