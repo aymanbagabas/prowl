@@ -699,25 +699,30 @@ fn render_once(
     }
 }
 
-/// Interactive `--once`: bring up an inline `Screen` (raw mode, hidden cursor, no
-/// echo) showing a `Loading...` frame while the fetch runs on a background
-/// thread, so keystrokes never echo and `q`/`Esc`/`Ctrl-C` can abort mid-fetch.
-/// On success the dashboard replaces the loading frame and is left inline in the
-/// terminal (like piped `--once`); on abort the frame is wiped and nothing is
-/// left behind. `Screen::finish` restores the terminal on every path.
-fn run_once_interactive(
-    terminal: Terminal<Stdin, Stdout>,
+/// Start an interactive program and restore it if any setup step fails after
+/// entering raw mode.
+fn start_program(terminal: Terminal<Stdin, Stdout>) -> Result<Program<Stdin, Stdout>> {
+    let mut program = Program::new(terminal)?;
+    let setup = (|| -> std::io::Result<()> {
+        program.init()?;
+        // `init` no longer probes the terminal, so ask: the reply is what lets
+        // the renderer bracket each frame in synchronized output.
+        program.query_capabilities(&[])?;
+        program.hide_cursor()
+    })();
+    if let Err(error) = setup {
+        let _ = program.finish();
+        return Err(error.into());
+    }
+    Ok(program)
+}
+
+fn run_once_session(
+    program: &mut Program<Stdin, Stdout>,
     cli: &Cli,
     client: &Client,
     repo: &Repo,
-) -> Result<()> {
-    let mut program = Program::new(terminal)?;
-    program.init()?;
-    // `init` no longer probes the terminal, so ask: the reply is what lets the
-    // renderer bracket each frame in synchronized output.
-    program.query_capabilities(&[])?;
-    program.hide_cursor()?;
-
+) -> Result<Option<Sections>> {
     // Inline loading frame; raw mode swallows keystrokes so nothing echoes into
     // the output while we wait.
     paint_loading(program.screen_mut())?;
@@ -785,24 +790,43 @@ fn run_once_interactive(
                 ascii,
                 false,
             )?;
-            program.finish()?;
-            if !cli.no_cache {
-                cache::save(repo, &sections);
-            }
-            Ok(())
+            Ok(Some(sections))
         }
-        Some(Err(e)) => {
-            program.finish()?; // restore the terminal before surfacing the error
-            Err(e)
-        }
+        Some(Err(error)) => Err(error),
         None => {
             // Aborted: wipe the loading frame so nothing is left behind.
             program.screen_mut().clear();
             program.screen_mut().render()?;
-            program.finish()?;
-            Ok(())
+            Ok(None)
         }
     }
+}
+
+fn run_once_interactive(
+    terminal: Terminal<Stdin, Stdout>,
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+) -> Result<()> {
+    let mut program = start_program(terminal)?;
+    let result = run_once_session(&mut program, cli, client, repo);
+    let finish = program.finish();
+    let sections = match result {
+        Ok(sections) => {
+            finish?;
+            sections
+        }
+        Err(error) => {
+            let _ = finish;
+            return Err(error);
+        }
+    };
+    if let Some(sections) = sections
+        && !cli.no_cache
+    {
+        cache::save(repo, &sections);
+    }
+    Ok(())
 }
 
 /// Paint the "My Shipments" section onto `s` at row `top`: my commit counts for
@@ -1177,7 +1201,7 @@ pub fn run() -> Result<()> {
     }
 
     // Interactive watch, structured as an uncurses `App` (start → run → stop):
-    // `stop` always runs, so `Screen::finish` restores the terminal on every
+    // `stop` always runs, so `Program::finish` restores the terminal on every
     // path — a clean quit, a `?`-operator error, or a panic-free fall-through.
     let mut app = App::start(terminal, &cli, &client, &repo)?;
     let result = app.run();
@@ -1237,13 +1261,7 @@ impl<'a> App<'a> {
         client: &'a Client,
         repo: &'a Repo,
     ) -> Result<Self> {
-        let mut program = Program::new(terminal)?;
-        program.init()?;
-        // `init` no longer probes the terminal, so ask: the reply is what lets
-        // the renderer bracket each frame in synchronized output, which is what
-        // keeps a frame that clears first (a resize) from being seen half-drawn.
-        program.query_capabilities(&[])?;
-        program.hide_cursor()?;
+        let program = start_program(terminal)?;
 
         let mut app = App {
             eta: timefmt::eta(cli.interval.dur),
