@@ -36,7 +36,8 @@ mergeability glyph falls back to `y` ready, `n` blocked, `!` conflicts, `?`
 unknown. `--branch` adds the head branch to every PR table, and `--no-draft`
 hides drafts. Each PR number is a clickable link to the PR. Tables use the full
 terminal width, giving most space to the title and then the optional branch. As
-the terminal gets narrower, detail columns disappear from the right;
+the terminal gets narrower, detail columns disappear from the right; the
+`FAIL` / `RUN` / `PASS` semaphore always disappears as one group.
 `+ resize for more` in the footer means a wider or taller terminal would reveal
 more information.
 

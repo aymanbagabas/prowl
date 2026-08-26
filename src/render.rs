@@ -235,7 +235,15 @@ fn table_layout(
             .rev()
             .find(|&c| shown[c] && Some(c) != branch)
         {
-            shown[c] = false;
+            if matches!(table.header[c], "FAIL" | "RUN" | "PASS") {
+                for (column, header) in table.header.iter().enumerate() {
+                    if matches!(*header, "FAIL" | "RUN" | "PASS") {
+                        shown[column] = false;
+                    }
+                }
+            } else {
+                shown[c] = false;
+            }
         } else {
             let c = branch.filter(|&c| shown[c])?;
             shown[c] = false;
@@ -1121,5 +1129,31 @@ mod tests {
             ["FAIL", "RUN", "PASS"].map(|value| line.find(value).expect("semaphore column"))
         };
         assert_eq!(starts(lines[0]), starts(lines[1]));
+    }
+
+    #[test]
+    fn responsive_layout_hides_the_whole_check_semaphore() {
+        let table = Table {
+            header: vec!["", "PR", "TITLE", "THREADS", "FAIL", "RUN", "PASS"],
+            rows: vec![vec![
+                Cell::plain(" "),
+                Cell::plain("#1"),
+                Cell::plain("a title"),
+                Cell::plain("0"),
+                Cell::plain("1"),
+                Cell::plain("2"),
+                Cell::plain("3"),
+            ]],
+        };
+        for width in MIN_WIDTH..=80 {
+            let output = encode(width, 2, Profile::Disabled, |canvas| {
+                paint_table(canvas, &table, true, 0);
+            });
+            let shown = ["FAIL", "RUN", "PASS"].map(|header| output.contains(header));
+            assert!(
+                shown.iter().all(|&value| value == shown[0]),
+                "partial semaphore at width {width}: {shown:?}"
+            );
+        }
     }
 }

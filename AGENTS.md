@@ -105,7 +105,8 @@ watch event loop); everything else is testable modules:
   responsive table layout. Tables fill the live surface width; `TITLE` is the
   largest flexible column and optional `BRANCH` is second. As width falls,
   columns right of `TITLE` disappear from right to left, with `BRANCH` removed
-  last. `TableAlignment` shares the two-column gutter and PR widths across all
+  last; `FAIL`/`RUN`/`PASS` hide as one semantic group, never as partial lamps.
+  `TableAlignment` shares the two-column gutter and PR widths across all
   tables in a view; when branches are shown it also shares TITLE width, so PR,
   TITLE, and BRANCH all start on the same columns. Below 24 columns the
   dashboard reports `Terminal too small.` Piped output and screenshots use
