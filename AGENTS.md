@@ -258,7 +258,9 @@ refresh now, `Tab` switches view, `?` toggles help, `/` opens search, `Enter`
 opens the selected row, `y`/`Y` copy links, the movement keys drive the cursor,
 `q`/`Q`/`Ctrl-C` quit (`Esc` clears the filter, or quits when there is none),
 `Ctrl-Z` suspends/resumes, `Resize` repaints. All watch UI state lives in one
-`Ui` struct (view, help, selection, search, `--branch`).
+`Ui` struct (view, help, selection, search, `--branch`). `ctrlc` handles external
+SIGINT/SIGTERM/SIGHUP by asking the event loop to stop; the owning `Program`
+still performs all teardown through `finish`.
 
 ## Key behaviors
 
@@ -363,8 +365,9 @@ opens the selected row, `y`/`Y` copy links, the movement keys drive the cursor,
   navigation, search, `Tab`, `?`, resize and suspend stay live mid-refresh and
   **quit is instant** (a quit abandons the in-flight request, which is reaped at
   process exit). The terminal is restored on every exit path by `App::stop`
-  (`Program::finish`), which the caller always runs after `App::run`. Pinned
-  staging buffers inherit the live screen's grapheme and East Asian width policy.
+  (`Program::finish`), which the caller always runs after `App::run`; external
+  SIGINT/SIGTERM/SIGHUP use the same cooperative path. Pinned staging buffers
+  inherit the live screen's grapheme and East Asian width policy.
 - **Interactive `--once`:** `run_once_interactive` brings up an *inline* `Program`
   (raw mode, hidden cursor) and paints a `Loading...` frame while the fetch runs on
   a background thread, so keystrokes don't echo and `q`/`Esc`/`Ctrl-C` aborts the

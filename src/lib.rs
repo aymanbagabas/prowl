@@ -48,6 +48,7 @@ use clap::Parser;
 use cli::{Cli, View};
 use github::{Client, Repo};
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use uncurses::buffer::{Bounded, SurfaceMut, TextBuffer};
 use uncurses::color::{Color, Profile};
@@ -58,6 +59,13 @@ use uncurses::screen::Screen;
 use uncurses::style::Style;
 use uncurses::terminal::{Stdin, Stdout, Terminal};
 use uncurses::text::{Encode, TextSurface};
+
+const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(60);
+static TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+fn termination_requested() -> bool {
+    TERMINATION_REQUESTED.load(Ordering::Acquire)
+}
 
 /// A fetched snapshot of every enabled section (`None` = section disabled).
 /// Public only so the offline fixture tests and the `demo` example (which
@@ -754,6 +762,9 @@ fn run_once_session(
 
     // `None` => the user aborted; `Some(result)` => the fetch finished.
     let fetched = loop {
+        if termination_requested() {
+            break None;
+        }
         match rx.try_recv() {
             Ok(result) => break Some(result),
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -761,7 +772,7 @@ fn run_once_session(
                 break Some(Err(anyhow::anyhow!("fetch worker stopped unexpectedly")));
             }
         }
-        if program.poll_event(Some(Duration::from_millis(60)))? {
+        if program.poll_event(Some(INPUT_POLL_INTERVAL))? {
             let mut aborted = false;
             // Reading observes the event, so capability replies (synchronized
             // output) are tracked as they pass through.
@@ -1193,19 +1204,23 @@ pub fn run() -> Result<()> {
         return render_once(&terminal, &sections, &cli, &Changes::default(), None);
     }
 
-    // Interactive `--once`: an inline screen shows a `Loading...` frame and
-    // swallows input while the fetch runs (abortable with `q`), then leaves the
-    // dashboard in the terminal.
-    if cli.once {
-        return run_once_interactive(terminal, &cli, &client, &repo);
+    ctrlc::set_handler(|| TERMINATION_REQUESTED.store(true, Ordering::Release))
+        .context("installing termination handler")?;
+    let result = if cli.once {
+        // An inline screen swallows input while the fetch runs, then leaves the
+        // dashboard in the terminal.
+        run_once_interactive(terminal, &cli, &client, &repo)
+    } else {
+        // `stop` always runs, so `Program::finish` restores the terminal after
+        // a clean quit or an error from the event loop.
+        let mut app = App::start(terminal, &cli, &client, &repo)?;
+        let result = app.run();
+        app.stop()?;
+        result
+    };
+    if termination_requested() {
+        std::process::exit(130);
     }
-
-    // Interactive watch, structured as an uncurses `App` (start → run → stop):
-    // `stop` always runs, so `Program::finish` restores the terminal on every
-    // path — a clean quit, a `?`-operator error, or a panic-free fall-through.
-    let mut app = App::start(terminal, &cli, &client, &repo)?;
-    let result = app.run();
-    app.stop()?;
     result
 }
 
@@ -1376,6 +1391,9 @@ impl<'a> App<'a> {
     /// user presses a quit key.
     fn run(&mut self) -> Result<()> {
         loop {
+            if termination_requested() {
+                return Ok(());
+            }
             if let Flow::Quit = self.fetch_responsive()? {
                 return Ok(());
             }
@@ -1434,6 +1452,9 @@ impl<'a> App<'a> {
         });
 
         loop {
+            if termination_requested() {
+                return Ok(Flow::Quit);
+            }
             match rx.try_recv() {
                 Ok(Ok((me, default_branch, sections))) => {
                     self.me = me;
@@ -1452,7 +1473,7 @@ impl<'a> App<'a> {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(Flow::Continue),
             }
-            if self.program.poll_event(Some(Duration::from_millis(60)))? {
+            if self.program.poll_event(Some(INPUT_POLL_INTERVAL))? {
                 while let Some(ev) = self.program.try_read_event()? {
                     if let Flow::Quit = self.handle_event(&ev)? {
                         return Ok(Flow::Quit);
@@ -1467,8 +1488,14 @@ impl<'a> App<'a> {
     fn wait_interval(&mut self) -> Result<Flow> {
         let deadline = Instant::now() + self.cli.interval.dur;
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-            if !self.program.poll_event(Some(remaining))? {
-                break; // timed out: scheduled refresh
+            if termination_requested() {
+                return Ok(Flow::Quit);
+            }
+            if !self
+                .program
+                .poll_event(Some(remaining.min(INPUT_POLL_INTERVAL)))?
+            {
+                continue;
             }
             while let Some(ev) = self.program.try_read_event()? {
                 match self.handle_event(&ev)? {
