@@ -1,4 +1,4 @@
-//! Typed serde models for the three GitHub GraphQL queries, plus the fetch
+//! Typed serde models for the GitHub GraphQL queries, plus the fetch
 //! helpers that run them. Queries are sent verbatim (the merged query's page
 //! size is the only thing we interpolate, so `--merged-limit` is honored).
 
@@ -109,32 +109,28 @@ pub struct QueueContext {
 }
 
 impl QueueEntryNode {
-    /// The earliest moment any check on the speculative merge commit began
-    /// running (RFC 3339). `None` when nothing has started yet (or there is no
-    /// speculative commit / no checks), which the BUILD column renders as a
-    /// dash. RFC 3339 `...Z` timestamps sort lexically == chronologically, so
-    /// `min` is earliest.
     /// Failing / running / passing checks on the speculative merge commit —
     /// the queue's own CI semaphore. Empty when the entry has no speculative
     /// commit or no checks yet.
     pub fn checks(&self) -> Checks {
-        let mut c = Checks::default();
         let Some(rollup) = self
             .head_commit
             .as_ref()
             .and_then(|h| h.status_check_rollup.as_ref())
         else {
-            return c;
+            return Checks::default();
         };
-        for sc in &rollup.contexts.check_runs {
-            c.add(status::check_run_lamp(&sc.state), sc.count);
-        }
-        for sc in &rollup.contexts.status_contexts {
-            c.add(status::status_context_lamp(&sc.state), sc.count);
-        }
-        c
+        checks_from_counts(
+            &rollup.contexts.check_runs,
+            &rollup.contexts.status_contexts,
+        )
     }
 
+    /// The earliest moment any check on the speculative merge commit began
+    /// running (RFC 3339). `None` when nothing has started yet (or there is no
+    /// speculative commit / no checks), which the BUILD column renders as a
+    /// dash. RFC 3339 `...Z` timestamps sort lexically == chronologically, so
+    /// `min` is earliest.
     pub fn build_started_at(&self) -> Option<String> {
         self.head_commit
             .as_ref()?
@@ -143,8 +139,9 @@ impl QueueEntryNode {
             .contexts
             .nodes
             .iter()
-            .filter_map(|c| c.started_at.clone())
+            .filter_map(|c| c.started_at.as_deref())
             .min()
+            .map(str::to_owned)
     }
 }
 
@@ -313,26 +310,33 @@ pub struct StateCount {
     pub count: u64,
 }
 
+fn checks_from_counts(check_runs: &[StateCount], status_contexts: &[StateCount]) -> Checks {
+    let mut checks = Checks::default();
+    for count in check_runs {
+        checks.add(status::check_run_lamp(&count.state), count.count);
+    }
+    for count in status_contexts {
+        checks.add(status::status_context_lamp(&count.state), count.count);
+    }
+    checks
+}
+
 impl PrNode {
     /// The failing / running / passing check counts for the PR's last commit.
     /// Check runs and legacy commit statuses are folded into the same semaphore.
     pub fn checks(&self) -> Checks {
-        let mut c = Checks::default();
         let Some(rollup) = self
             .commits
             .nodes
             .first()
             .and_then(|n| n.commit.status_check_rollup.as_ref())
         else {
-            return c;
+            return Checks::default();
         };
-        for sc in &rollup.contexts.check_runs {
-            c.add(status::check_run_lamp(&sc.state), sc.count);
-        }
-        for sc in &rollup.contexts.status_contexts {
-            c.add(status::status_context_lamp(&sc.state), sc.count);
-        }
-        c
+        checks_from_counts(
+            &rollup.contexts.check_runs,
+            &rollup.contexts.status_contexts,
+        )
     }
 }
 

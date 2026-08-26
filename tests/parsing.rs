@@ -2,7 +2,7 @@
 //! responses are parsed through the same path the binary uses, then turned into
 //! rows and rendered. No network access.
 
-use prowl::model::{MergedData, MineData, QueueData, ReviewsData};
+use prowl::model::{MergedData, MineData, QueueData, ReviewsData, queue_nodes};
 use prowl::status::{Checks, Mergeable, ReviewState, Status};
 use prowl::{github, merged, prs, queue, render, reviews};
 use std::collections::HashSet;
@@ -18,7 +18,7 @@ fn parse<T: serde::de::DeserializeOwned>(json: &str) -> T {
 #[test]
 fn queue_parses_orders_and_flags_mine() {
     let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
-    let rows = queue::build_rows(model_queue_nodes(data), "caarlos0");
+    let rows = queue::build_rows(queue_nodes(data), "caarlos0");
 
     // Input positions are 2,1,3; rows come out ordered by position ascending.
     assert_eq!(
@@ -37,7 +37,7 @@ fn queue_parses_orders_and_flags_mine() {
 #[test]
 fn queue_counts_speculative_build_checks() {
     let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
-    let rows = queue::build_rows(model_queue_nodes(data), "caarlos0");
+    let rows = queue::build_rows(queue_nodes(data), "caarlos0");
 
     // #101: 1 failing + 3 running + 6 passing check runs, plus one passing
     // legacy status context folded into the same semaphore.
@@ -71,8 +71,8 @@ fn queue_counts_speculative_build_checks() {
 fn queue_null_and_empty_both_yield_no_rows() {
     let null: QueueData = parse(include_str!("fixtures/queue_null.json"));
     let empty: QueueData = parse(include_str!("fixtures/queue_empty.json"));
-    assert!(model_queue_nodes(null).is_empty());
-    assert!(model_queue_nodes(empty).is_empty());
+    assert!(queue_nodes(null).is_empty());
+    assert!(queue_nodes(empty).is_empty());
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn queue_styled_render_uses_palette_and_links() {
     use uncurses::text::Encode;
 
     let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
-    let rows = queue::build_rows(model_queue_nodes(data), "caarlos0");
+    let rows = queue::build_rows(queue_nodes(data), "caarlos0");
     let table = queue::to_table(&rows, false, false);
 
     let mut canvas = TextBuffer::new(render::OUTPUT_WIDTH as u16, 8);
@@ -118,7 +118,7 @@ fn queue_styled_render_uses_palette_and_links() {
 #[test]
 fn queue_build_time_is_earliest_check_run_start() {
     let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
-    let rows = queue::build_rows(model_queue_nodes(data), "caarlos0");
+    let rows = queue::build_rows(queue_nodes(data), "caarlos0");
 
     // #101 (pos 1): earliest check-run start across its suites (ignoring the
     // empty / null / not-yet-started ones).
@@ -341,9 +341,4 @@ fn reviewed_merged_parses_sorts_desc_with_author() {
     assert_eq!(rows[0].author, "erin");
     assert_eq!(rows[1].number, 202);
     assert_eq!(rows[1].author, "frank");
-}
-
-// `model::queue_nodes` takes ownership; a tiny shim keeps the call sites tidy.
-fn model_queue_nodes(data: QueueData) -> Vec<prowl::model::QueueEntryNode> {
-    prowl::model::queue_nodes(data)
 }

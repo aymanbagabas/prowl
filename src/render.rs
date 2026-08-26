@@ -12,6 +12,7 @@
 
 use crate::cli::View;
 use crate::status::{self, Lamp};
+use std::borrow::Cow;
 use uncurses::ansi::truncate::truncate as truncate_tail;
 use uncurses::buffer::{Bounded, Surface, SurfaceMut, TextBuffer, View as BufView};
 use uncurses::color::{Color, Profile};
@@ -62,25 +63,25 @@ fn link_params(url: &str) -> String {
 }
 
 impl Cell {
-    pub fn plain(text: impl Into<String>) -> Cell {
-        Cell {
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
             text: text.into(),
             style: Style::new(),
         }
     }
 
-    pub fn styled(text: impl Into<String>, style: impl Into<Style>) -> Cell {
-        Cell {
+    pub fn styled(text: impl Into<String>, style: impl Into<Style>) -> Self {
+        Self {
             text: text.into(),
             style: style.into(),
         }
     }
 
     /// A dim + underlined OSC-8 hyperlink whose visible text is `text`.
-    pub fn link(text: impl Into<String>, url: impl Into<String>) -> Cell {
+    pub fn link(text: impl Into<String>, url: impl Into<String>) -> Self {
         let url = url.into();
         let params = link_params(&url);
-        Cell {
+        Self {
             text: text.into(),
             style: Style::new().faint().underline().link(url, params),
         }
@@ -92,18 +93,18 @@ impl Cell {
         text: impl Into<String>,
         url: impl Into<String>,
         style: impl Into<Style>,
-    ) -> Cell {
+    ) -> Self {
         let url = url.into();
         let params = link_params(&url);
-        Cell {
+        Self {
             text: text.into(),
             style: style.into().underline().link(url, params),
         }
     }
 
     /// A styled, clickable `#<number>` PR link.
-    pub fn pr(number: i64, url: impl Into<String>, style: impl Into<Style>) -> Cell {
-        Cell::link_styled(format!("#{number}"), url, style)
+    pub fn pr(number: i64, url: impl Into<String>, style: impl Into<Style>) -> Self {
+        Self::link_styled(format!("#{number}"), url, style)
     }
 }
 
@@ -111,6 +112,12 @@ impl Cell {
 pub struct Table {
     pub header: Vec<&'static str>,
     pub rows: Vec<Vec<Cell>>,
+}
+
+impl Table {
+    fn column(&self, name: &str) -> Option<usize> {
+        self.header.iter().position(|header| *header == name)
+    }
 }
 
 /// Truncate `s` to at most `max` display columns, marking the cut with an
@@ -149,14 +156,12 @@ fn aligned_col_width(
     title: usize,
     alignment: Option<&TableAlignment>,
 ) -> usize {
-    alignment
-        .and_then(|a| {
-            (column < title)
-                .then(|| a.prefix_widths.get(column))
-                .flatten()
-        })
-        .copied()
-        .unwrap_or_else(|| col_width(s, table, column))
+    if column < title
+        && let Some(width) = alignment.and_then(|a| a.prefix_widths.get(column))
+    {
+        return *width;
+    }
+    col_width(s, table, column)
 }
 
 /// Lay a table out across the full surface width. Columns to the right of TITLE
@@ -168,13 +173,13 @@ fn table_layout(
     alignment: Option<&TableAlignment>,
 ) -> Option<TableLayout> {
     let available = usize::from(s.bounds().width);
-    let title = table.header.iter().position(|h| *h == "TITLE");
+    let title = table.column("TITLE");
     let Some(title) = title else {
         let columns: Vec<usize> = (0..table.header.len()).collect();
         let widths = columns.iter().map(|&c| col_width(s, table, c)).collect();
         return Some(TableLayout { columns, widths });
     };
-    let branch = table.header.iter().position(|h| *h == "BRANCH");
+    let branch = table.column("BRANCH");
     let mut shown = vec![true; table.header.len()];
     if alignment.is_some_and(|a| a.hide_branch)
         && let Some(branch) = branch
@@ -244,7 +249,7 @@ fn table_layout(
 pub fn table_alignment(s: &impl TextSurface, tables: &[&Table]) -> TableAlignment {
     let prefix_len = tables
         .iter()
-        .filter_map(|table| table.header.iter().position(|h| *h == "TITLE"))
+        .filter_map(|table| table.column("TITLE"))
         .max()
         .unwrap_or(0);
     let prefix_widths = (0..prefix_len)
@@ -266,11 +271,11 @@ pub fn table_alignment(s: &impl TextSurface, tables: &[&Table]) -> TableAlignmen
         .iter()
         .map(|table| table_layout(s, table, Some(&alignment)))
         .collect();
-    if !tables.iter().any(|table| table.header.contains(&"BRANCH")) {
+    if !tables.iter().any(|table| table.column("BRANCH").is_some()) {
         return alignment;
     }
     alignment.hide_branch = tables.iter().zip(&layouts).any(|(table, layout)| {
-        let has_branch = table.header.contains(&"BRANCH");
+        let has_branch = table.column("BRANCH").is_some();
         has_branch
             && !layout.as_ref().is_some_and(|layout| {
                 layout
@@ -286,7 +291,7 @@ pub fn table_alignment(s: &impl TextSurface, tables: &[&Table]) -> TableAlignmen
         .iter()
         .zip(layouts)
         .filter_map(|(table, layout)| {
-            let title = table.header.iter().position(|h| *h == "TITLE")?;
+            let title = table.column("TITLE")?;
             let layout = layout?;
             let position = layout.columns.iter().position(|&column| column == title)?;
             Some(layout.widths[position])
@@ -349,8 +354,8 @@ pub fn paint_table_aligned(
     let Some(layout) = table_layout(s, table, Some(alignment)) else {
         return top;
     };
-    let title_idx = table.header.iter().position(|h| *h == "TITLE");
-    let branch_idx = table.header.iter().position(|h| *h == "BRANCH");
+    let title_idx = table.column("TITLE");
+    let branch_idx = table.column("BRANCH");
 
     // Column start positions: running sum of widths plus the separators.
     let mut xs = Vec::with_capacity(layout.columns.len());
@@ -375,11 +380,11 @@ pub fn paint_table_aligned(
                 continue;
             };
             let text = if Some(column) == title_idx || Some(column) == branch_idx {
-                truncate(&cell.text, layout.widths[i], ascii)
+                Cow::Owned(truncate(&cell.text, layout.widths[i], ascii))
             } else {
-                cell.text.clone()
+                Cow::Borrowed(cell.text.as_str())
             };
-            s.set_str((xs[i], y), &text, &cell.style);
+            s.set_str((xs[i], y), text.as_ref(), &cell.style);
         }
     }
     top + 1 + table.rows.len() as u16
@@ -430,7 +435,7 @@ pub fn paint_header(
     y: u16,
 ) -> u16 {
     let dim = Style::new().faint();
-    let mut end = if ascii {
+    let end = if ascii {
         let text = match count {
             Some(c) => format!("{title} ({c})"),
             None => title.to_string(),
@@ -448,9 +453,8 @@ pub fn paint_header(
         }
     };
     if let Some(n) = note {
-        end = s.set_str((end.x + 2, y), n, &dim);
+        s.set_str((end.x + 2, y), n, &dim);
     }
-    let _ = end;
     y + 1
 }
 
@@ -488,7 +492,7 @@ pub fn highlight_row(s: &mut impl TextSurface, y: u16) {
 /// Paint the watch-mode key-hint footer at row `y`, folding the constant
 /// refresh interval into the refresh hint: `r refresh (every 5m) - tab switch
 /// view - enter open - / search - ? help`. While a refresh is in flight the
-/// first hint becomes `r refreshing` (the interval is dropped and the `r` glyph
+/// refresh hint becomes `r refreshing` (the interval is dropped and the `r` glyph
 /// is dimmed, since `r` is inert until the fetch finishes). Each key glyph is a
 /// bold muted accent, its labels dim; plain in ASCII mode. Returns y + 1.
 pub fn paint_footer(
@@ -532,7 +536,7 @@ pub fn paint_footer(
             x = s.set_str((x, y), " - ", &dim).x;
         }
         // `r` is inert while a fetch is in flight, so its glyph fades to dim.
-        let kstyle = if i == 0 && refreshing { &dim } else { &key };
+        let kstyle = if *k == "r" && refreshing { &dim } else { &key };
         let p = s.set_str((x, y), k, kstyle);
         x = s.set_str((p.x + 1, y), label, &dim).x;
     }
@@ -931,7 +935,7 @@ mod tests {
             "r refresh (every 5m) - tab switch view - enter open - y copy - / search - ? help"
         );
 
-        // While a refresh is in flight the first hint says so instead.
+        // While a refresh is in flight the refresh hint says so instead.
         let refreshing = encode(80, 1, Profile::Disabled, |b| {
             paint_footer(b, "5m", true, false, true, 0);
         });
@@ -950,6 +954,12 @@ mod tests {
             paint_footer(b, "5m", false, true, true, 0);
         });
         assert!(compact.starts_with("+ resize for more - r refresh"));
+
+        let compact_refreshing = encode(80, 1, Profile::TrueColor, |b| {
+            paint_footer(b, "5m", true, true, false, 0);
+        });
+        assert!(compact_refreshing.starts_with("\x1b[1;"));
+        assert!(compact_refreshing.contains("\x1b[2mresize for more - r\x1b[m \x1b[2mrefreshing"));
     }
 
     #[test]

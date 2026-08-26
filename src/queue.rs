@@ -58,6 +58,7 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
 }
 
 pub fn to_table(rows: &[QueueRow], ascii: bool, show_branch: bool) -> Table {
+    let branch_style = Style::new().faint();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let (meta, pr, author_style, title) = if r.mine {
@@ -85,7 +86,7 @@ pub fn to_table(rows: &[QueueRow], ascii: bool, show_branch: bool) -> Table {
             Cell::styled(r.title.clone(), &title),
         ];
         if show_branch {
-            row.push(Cell::styled(r.branch.clone(), Style::new().faint()));
+            row.push(Cell::styled(r.branch.clone(), &branch_style));
         }
         row.extend([
             Cell::styled(author, &author_style),

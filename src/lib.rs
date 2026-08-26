@@ -383,18 +383,27 @@ fn paint_section(
     alignment: &render::TableAlignment,
     ascii: bool,
     top: u16,
-) -> Option<u16> {
+) -> u16 {
     let y = render::paint_header(s, title, accent, Some(&count.to_string()), note, ascii, top);
     let y = match table {
-        Some(table) => {
-            if !render::table_fits_aligned(s, table, alignment) {
-                return None;
-            }
-            render::paint_table_aligned(s, table, alignment, ascii, y)
-        }
+        Some(table) => render::paint_table_aligned(s, table, alignment, ascii, y),
         None => render::paint_dim_at(s, empty_msg, render::ROW_INDENT, y),
     };
-    Some(y + 1)
+    y + 1
+}
+
+fn table_state(
+    s: &impl TextSurface,
+    tables: &[&render::Table],
+) -> (render::TableAlignment, bool, bool) {
+    let alignment = render::table_alignment(s, tables);
+    let compact = tables
+        .iter()
+        .any(|table| render::table_is_compact_aligned(s, table, &alignment));
+    let fits = tables
+        .iter()
+        .all(|table| render::table_fits_aligned(s, table, &alignment));
+    (alignment, compact, fits)
 }
 
 /// Whether `table` has a `local`-th row — i.e. whether the selection landed on
@@ -473,13 +482,7 @@ fn paint_mine(
         .into_iter()
         .flatten()
         .collect();
-    let alignment = render::table_alignment(s, &tables);
-    let compact = tables
-        .iter()
-        .any(|table| render::table_is_compact_aligned(s, table, &alignment));
-    let fits = tables
-        .iter()
-        .all(|table| render::table_fits_aligned(s, table, &alignment));
+    let (alignment, compact, fits) = table_state(s, &tables);
     if !fits {
         return (top, None, compact, false);
     }
@@ -515,8 +518,7 @@ fn paint_mine(
             &alignment,
             ascii,
             y,
-        )
-        .expect("table fit was checked");
+        );
     }
     if visible.queue
         && let Some(rows) = &sections.queue
@@ -541,8 +543,7 @@ fn paint_mine(
             &alignment,
             ascii,
             y,
-        )
-        .expect("table fit was checked");
+        );
     }
     if visible.merged
         && let Some(rows) = &sections.merged
@@ -559,8 +560,7 @@ fn paint_mine(
             &alignment,
             ascii,
             y,
-        )
-        .expect("table fit was checked");
+        );
     }
     if visible.shipments
         && let Some(stats) = &sections.commits
@@ -597,13 +597,7 @@ fn paint_reviews(
         .filter(|r| !r.is_empty())
         .map(|rows| reviews::merged_to_table(rows, ascii, show_branch));
     let tables: Vec<&render::Table> = [&open_table, &merged_table].into_iter().flatten().collect();
-    let alignment = render::table_alignment(s, &tables);
-    let compact = tables
-        .iter()
-        .any(|table| render::table_is_compact_aligned(s, table, &alignment));
-    let fits = tables
-        .iter()
-        .all(|table| render::table_fits_aligned(s, table, &alignment));
+    let (alignment, compact, fits) = table_state(s, &tables);
     if !fits {
         return (top, None, compact, false);
     }
@@ -642,8 +636,7 @@ fn paint_reviews(
             &alignment,
             ascii,
             y,
-        )
-        .expect("table fit was checked");
+        );
     }
     if visible.reviewed_merged
         && let Some(rows) = &sections.reviewed_merged
@@ -660,8 +653,7 @@ fn paint_reviews(
             &alignment,
             ascii,
             y,
-        )
-        .expect("table fit was checked");
+        );
     }
     (y, caret, compact, true)
 }
@@ -862,6 +854,15 @@ fn bottom_bound(ui: &Ui) -> u16 {
     n as u16
 }
 
+fn paint_too_small(screen: &mut Screen<Stdout>, width: Option<u16>) {
+    if let Some(width) = width {
+        screen.resize((width, 1));
+    }
+    screen.clear();
+    render::paint_dim(screen, "Terminal too small.", 0);
+    screen.clear_cursor_position();
+}
+
 /// Paint the dashboard onto a `Screen` and render it.
 ///
 /// `pinned` is the watch layout: the screen is the whole terminal, the bottom
@@ -891,16 +892,13 @@ fn render_dashboard(
         let (w, rows) = (screen.width().max(1), screen.height().max(1));
         let layout = responsive_layout(w, rows, sections, ui, status, footer, true, true);
         if layout.too_small {
-            screen.clear();
-            render::paint_dim(screen, "Terminal too small.", 0);
-            screen.clear_cursor_position();
+            paint_too_small(screen, None);
             screen.render()?;
             return Ok(None);
         }
 
         // Body and bottom are painted into their own buffers because the frame
-        // places them independently: the body may be scrolled, the bottom is
-        // pinned to the last rows.
+        // places them independently and pins the bottom to the last rows.
         let mut body = staging_buffer(screen, w, height_bound(sections, ui).max(1));
         let (body_h, sel, compact, fits) = paint_body(
             &mut body,
@@ -913,9 +911,7 @@ fn render_dashboard(
             0,
         );
         if !fits {
-            screen.clear();
-            render::paint_dim(screen, "Terminal too small.", 0);
-            screen.clear_cursor_position();
+            paint_too_small(screen, None);
             screen.render()?;
             return Ok(None);
         }
@@ -944,9 +940,7 @@ fn render_dashboard(
     } else {
         let w = screen.width().max(1);
         if w < render::MIN_WIDTH {
-            screen.resize((w, 1));
-            screen.clear();
-            render::paint_dim(screen, "Terminal too small.", 0);
+            paint_too_small(screen, Some(w));
             None
         } else {
             // Grow tall enough to paint everything, paint, then shrink to the height
@@ -959,9 +953,7 @@ fn render_dashboard(
                 screen.resize((w, used.max(1)));
                 caret
             } else {
-                screen.resize((w, 1));
-                screen.clear();
-                render::paint_dim(screen, "Terminal too small.", 0);
+                paint_too_small(screen, Some(w));
                 None
             }
         }

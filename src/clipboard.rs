@@ -3,8 +3,7 @@
 //! unlike `pbcopy`/`xclip` — it reaches the clipboard of the machine you're
 //! *looking at*, so it works over SSH too. The terminal has to support it (and
 //! tmux needs `set -g set-clipboard on`); when it doesn't, the sequence is
-//! silently swallowed, which is why the dashboard's confirmation says the link
-//! was sent rather than pasted.
+//! silently swallowed, so prowl cannot confirm that the terminal accepted it.
 
 use std::io::Write;
 

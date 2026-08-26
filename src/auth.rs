@@ -1,8 +1,8 @@
 //! GitHub OAuth device-flow login and token storage.
 //!
 //! The token is resolved from (in order): the `PROWL_TOKEN`/`GITHUB_TOKEN`
-//! environment variables, the OS keyring (macOS/Windows) or a chmod-600 file
-//! (Linux/headless), or — interactively — the OAuth device flow.
+//! environment variables, the OS keyring or a chmod-600 file fallback, or —
+//! interactively — the OAuth device flow.
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -140,14 +140,11 @@ fn poll_for_token(dc: &DeviceCode) -> Result<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Storage: OS keyring (macOS/Windows) with a chmod-600 file fallback.
+// Storage: OS keyring with a chmod-600 file fallback.
 // ---------------------------------------------------------------------------
 
 fn load_stored() -> Option<String> {
-    if let Some(t) = keyring_get() {
-        return Some(t);
-    }
-    file_get()
+    keyring_get().or_else(file_get)
 }
 
 fn store(token: &str) {

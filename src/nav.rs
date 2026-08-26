@@ -66,24 +66,18 @@ fn hit(hay: &str, query_lower: &str) -> bool {
     query_lower.is_empty() || hay.to_lowercase().contains(query_lower)
 }
 
-/// Push, in order, the URLs of the rows in `rows` (if present) that match the
-/// already-lowercased `query`.
-fn push_matches<'a, T: Searchable>(urls: &mut Vec<&'a str>, rows: Option<&'a [T]>, query: &str) {
-    if let Some(rows) = rows {
-        urls.extend(
-            rows.iter()
-                .filter(|r| hit(&r.haystack(), query))
-                .map(Searchable::url),
-        );
-    }
-}
-
 /// The URLs of the rows in `rows` (if present) matching the already-lowercased
 /// `query` — one rendered section's worth of navigable targets.
 fn group<'a, T: Searchable>(rows: Option<&'a [T]>, query: &str) -> Vec<&'a str> {
-    let mut urls = Vec::new();
-    push_matches(&mut urls, rows, query);
-    urls
+    rows.unwrap_or_default()
+        .iter()
+        .filter(|row| hit(&row.haystack(), query))
+        .map(Searchable::url)
+        .collect()
+}
+
+fn when_visible<T>(rows: Option<&[T]>, visible: bool) -> Option<&[T]> {
+    rows.filter(|_| visible)
 }
 
 fn prs_group<'a>(rows: Option<&'a [PrRow]>, query: &str, queue_visible: bool) -> Vec<&'a str> {
@@ -129,12 +123,12 @@ fn groups<'a>(view: View, s: &'a Sections, query: &str, visible: Visibility) -> 
     match view {
         View::Mine => vec![
             prs_group(
-                visible.prs.then_some(s.prs.as_deref()).flatten(),
+                when_visible(s.prs.as_deref(), visible.prs),
                 &q,
                 visible.queue,
             ),
-            group(visible.queue.then_some(s.queue.as_deref()).flatten(), &q),
-            group(visible.merged.then_some(s.merged.as_deref()).flatten(), &q),
+            group(when_visible(s.queue.as_deref(), visible.queue), &q),
+            group(when_visible(s.merged.as_deref(), visible.merged), &q),
             if visible.shipments {
                 shipments(s, &q)
             } else {
@@ -142,15 +136,9 @@ fn groups<'a>(view: View, s: &'a Sections, query: &str, visible: Visibility) -> 
             },
         ],
         View::Reviews => vec![
+            group(when_visible(s.reviews.as_deref(), visible.reviews), &q),
             group(
-                visible.reviews.then_some(s.reviews.as_deref()).flatten(),
-                &q,
-            ),
-            group(
-                visible
-                    .reviewed_merged
-                    .then_some(s.reviewed_merged.as_deref())
-                    .flatten(),
+                when_visible(s.reviewed_merged.as_deref(), visible.reviewed_merged),
                 &q,
             ),
         ],
@@ -219,12 +207,10 @@ pub(crate) fn filter(s: &Sections, query: &str) -> Sections {
 
 /// Clone the rows whose haystack matches the already-lowercased `query`.
 fn matching<T: Searchable + Clone>(rows: &[T], query: &str) -> Vec<T> {
-    retain(rows, |x| hit(&x.haystack(), query))
-}
-
-/// Clone the elements of `rows` that satisfy `keep`.
-fn retain<T: Clone>(rows: &[T], keep: impl Fn(&T) -> bool) -> Vec<T> {
-    rows.iter().filter(|x| keep(x)).cloned().collect()
+    rows.iter()
+        .filter(|row| hit(&row.haystack(), query))
+        .cloned()
+        .collect()
 }
 
 /// Filter the shipments: releases by tag, the "upcoming" bucket by the literal
@@ -236,7 +222,12 @@ fn filter_commits(stats: &CommitStats, query_lower: &str) -> CommitStats {
             .upcoming
             .clone()
             .filter(|_| hit("upcoming", query_lower)),
-        releases: retain(&stats.releases, |r| hit(&r.tag, query_lower)),
+        releases: stats
+            .releases
+            .iter()
+            .filter(|release| hit(&release.tag, query_lower))
+            .cloned()
+            .collect(),
     }
 }
 

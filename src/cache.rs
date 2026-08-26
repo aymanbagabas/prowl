@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bump when the cached layout changes; older files are then ignored.
-const VERSION: u32 = 9;
+const VERSION: u32 = 10;
 
 /// A loaded cache entry.
 #[derive(Deserialize)]
@@ -62,14 +62,15 @@ pub(crate) fn save(repo: &Repo, sections: &Sections) {
         saved_at: &saved_at,
         sections,
     };
-    if let Ok(bytes) = serde_json::to_vec(&data) {
-        if std::fs::write(&path, bytes).is_err() {
-            return;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
+    let Ok(bytes) = serde_json::to_vec(&data) else {
+        return;
+    };
+    if std::fs::write(&path, bytes).is_err() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
 }

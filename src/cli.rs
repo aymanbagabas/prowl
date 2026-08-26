@@ -148,10 +148,7 @@ impl ReviewScope {
 
 impl Cli {
     fn shows(&self, s: Section) -> bool {
-        match &self.only {
-            None => true,
-            Some(list) => list.contains(&s),
-        }
+        self.only.as_ref().is_none_or(|list| list.contains(&s))
     }
     pub fn show_queue(&self) -> bool {
         self.shows(Section::Queue)

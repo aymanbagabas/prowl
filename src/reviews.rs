@@ -6,7 +6,7 @@ use crate::model::{MergedNode, ReviewPrNode, ReviewsData};
 use crate::render::{self, Cell, Table};
 use crate::status::{self, BLUE, ReviewState};
 use crate::timefmt;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use uncurses::style::Style;
 
 /// Author logins are truncated to this many display columns (matches the queue).
@@ -74,20 +74,18 @@ fn review_state(requested: bool, node: &ReviewPrNode) -> ReviewState {
 /// appear in both (a re-review). Sorted by state (actionable first), then by
 /// last update (most recent first).
 pub fn build_open_rows(data: ReviewsData) -> Vec<ReviewRow> {
-    let mut requested: HashSet<i64> = HashSet::new();
-    let mut nodes: HashMap<i64, ReviewPrNode> = HashMap::new();
+    let mut nodes: HashMap<i64, (ReviewPrNode, bool)> = HashMap::new();
     for n in data.requested.nodes {
-        requested.insert(n.number);
-        nodes.entry(n.number).or_insert(n);
+        nodes.entry(n.number).or_insert((n, true));
     }
     for n in data.reviewed.nodes {
-        nodes.entry(n.number).or_insert(n);
+        nodes.entry(n.number).or_insert((n, false));
     }
 
     let mut rows: Vec<ReviewRow> = nodes
         .into_values()
-        .map(|n| {
-            let state = review_state(requested.contains(&n.number), &n);
+        .map(|(n, requested)| {
+            let state = review_state(requested, &n);
             ReviewRow {
                 number: n.number,
                 is_draft: n.is_draft,
