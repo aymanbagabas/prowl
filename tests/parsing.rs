@@ -203,11 +203,11 @@ fn mine_renders_the_check_semaphore_and_thread_count() {
     let table = prs::to_table(&rows, true, &HashSet::new(), false);
     assert_eq!(
         table.header,
-        ["", "", "PR", "TITLE", "FAIL", "RUN", "PASS", "THREADS"]
+        ["", "", "PR", "TITLE", "THREADS", "FAIL", "RUN", "PASS"]
     );
     // #6475: 4 failing, none running, 17 passed, no unresolved threads.
     let tail: Vec<&str> = table.rows[0][4..].iter().map(|c| c.text.as_str()).collect();
-    assert_eq!(tail, ["4", "0", "17", "0"]);
+    assert_eq!(tail, ["0", "4", "0", "17"]);
     // #5323 has no checks at all — every lamp reads zero.
     let tail: Vec<&str> = table.rows[1][4..].iter().map(|c| c.text.as_str()).collect();
     assert_eq!(tail, ["0", "0", "0", "0"]);

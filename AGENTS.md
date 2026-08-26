@@ -142,7 +142,7 @@ watch event loop); everything else is testable modules:
   the first visible body row onto the top of the screen.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
   Each row's PR number is the OSC-8 link (no separate URL column). The open-PRs
-  columns are `[mark] [M] PR TITLE [BRANCH] FAIL RUN PASS THREADS`: `M` is the
+  columns are `[mark] [M] PR TITLE [BRANCH] THREADS FAIL RUN PASS`: `M` is the
   single mergeability glyph, `FAIL`/`RUN`/`PASS` are the check-run semaphore
   (always all three, dim when zero, colored when not) and `THREADS` the
   unresolved review threads (`100+` when the page was capped).

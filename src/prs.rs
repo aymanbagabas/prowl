@@ -115,10 +115,10 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>, show_bran
             row.push(Cell::styled(r.branch.clone(), &dim));
         }
         row.extend([
+            threads,
             render::lamp_cell(r.checks.fail, Lamp::Fail),
             render::lamp_cell(r.checks.running, Lamp::Running),
             render::lamp_cell(r.checks.pass, Lamp::Pass),
-            threads,
         ]);
         out.push(row);
     }
@@ -126,7 +126,7 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>, show_bran
     if show_branch {
         header.push("BRANCH");
     }
-    header.extend(["FAIL", "RUN", "PASS", "THREADS"]);
+    header.extend(["THREADS", "FAIL", "RUN", "PASS"]);
     Table { header, rows: out }
 }
 
@@ -243,8 +243,12 @@ mod tests {
         assert_eq!(rows[0].unresolved, 100);
         assert!(rows[0].unresolved_capped);
         let table = to_table(&rows, true, &HashSet::new(), false);
-        // Last column is THREADS; the `+` says "at least this many".
-        assert_eq!(table.rows[0].last().unwrap().text, "100+");
+        let threads = table
+            .header
+            .iter()
+            .position(|header| *header == "THREADS")
+            .expect("THREADS column");
+        assert_eq!(table.rows[0][threads].text, "100+");
     }
 
     #[test]
@@ -298,7 +302,7 @@ mod tests {
         assert_eq!(
             table.header,
             [
-                "", "", "PR", "TITLE", "BRANCH", "FAIL", "RUN", "PASS", "THREADS"
+                "", "", "PR", "TITLE", "BRANCH", "THREADS", "FAIL", "RUN", "PASS"
             ]
         );
         assert_eq!(table.rows[0][4].text, "branch-1");
@@ -318,8 +322,8 @@ mod tests {
             ],
         )]);
         let table = to_table(&rows, true, &HashSet::new(), false);
-        // ..., FAIL, RUN, PASS, THREADS
+        // ..., THREADS, FAIL, RUN, PASS
         let tail: Vec<&str> = table.rows[0][4..].iter().map(|c| c.text.as_str()).collect();
-        assert_eq!(tail, ["2", "3", "9", "0"]);
+        assert_eq!(tail, ["0", "2", "3", "9"]);
     }
 }

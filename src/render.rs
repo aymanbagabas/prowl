@@ -1097,4 +1097,29 @@ mod tests {
             starts(lines[5], ["#30", "third title", "b/third"])
         );
     }
+
+    #[test]
+    fn alignment_keeps_the_check_semaphore_at_the_right() {
+        let open = Table {
+            header: vec!["", "", "PR", "TITLE", "THREADS", "FAIL", "RUN", "PASS"],
+            rows: vec![],
+        };
+        let queue = Table {
+            header: vec![
+                "", "#", "PR", "TITLE", "AUTHOR", "WAIT", "BUILD", "FAIL", "RUN", "PASS",
+            ],
+            rows: vec![],
+        };
+        let mut canvas = TextBuffer::new(80, 2);
+        let alignment = table_alignment(&canvas, &[&open, &queue]);
+        paint_table_aligned(&mut canvas, &open, &alignment, true, 0);
+        paint_table_aligned(&mut canvas, &queue, &alignment, true, 1);
+
+        let output = canvas.display_with(Profile::Disabled).to_string();
+        let lines: Vec<&str> = output.lines().collect();
+        let starts = |line: &str| {
+            ["FAIL", "RUN", "PASS"].map(|value| line.find(value).expect("semaphore column"))
+        };
+        assert_eq!(starts(lines[0]), starts(lines[1]));
+    }
 }
