@@ -72,6 +72,7 @@ fn entry(position: i64, number: i64, author: &str, title: &str) -> QueueRow {
         number,
         author: author.into(),
         title: title.into(),
+        branch: format!("feature/pr-{number}"),
         url: url(number),
         mine: false,
         enqueued_at: ago(0),
@@ -84,6 +85,7 @@ fn merged(number: i64, title: &str, release: Option<&str>, merged_mins: i64) -> 
     MergedRow {
         number,
         title: title.into(),
+        branch: format!("merged/pr-{number}"),
         url: url(number),
         release: release.map(|tag| ReleaseRef {
             tag: tag.into(),
@@ -229,6 +231,7 @@ fn sections() -> prowl::Sections {
                 number: 415,
                 is_draft: false,
                 title: "feat(auth): store the token in the OS keyring".into(),
+                branch: "keyring-token".into(),
                 author: "monalisa".into(),
                 url: url(415),
                 state: ReviewState::Awaiting,
@@ -238,6 +241,7 @@ fn sections() -> prowl::Sections {
                 number: 409,
                 is_draft: false,
                 title: "fix(github): surface GraphQL errors instead of empty data".into(),
+                branch: "graphql-errors".into(),
                 author: "hubot".into(),
                 url: url(409),
                 state: ReviewState::ReReview,
@@ -247,6 +251,7 @@ fn sections() -> prowl::Sections {
                 number: 402,
                 is_draft: false,
                 title: "feat(render): truncate long titles to fit 120 columns".into(),
+                branch: "responsive-tables".into(),
                 author: "robotocat".into(),
                 url: url(402),
                 state: ReviewState::Updated,
@@ -256,6 +261,7 @@ fn sections() -> prowl::Sections {
                 number: 397,
                 is_draft: false,
                 title: "chore(ci): run clippy with -D warnings".into(),
+                branch: "clippy-warnings".into(),
                 author: "monalisa".into(),
                 url: url(397),
                 state: ReviewState::Reviewed,
@@ -266,6 +272,7 @@ fn sections() -> prowl::Sections {
             ReviewedMergedRow {
                 number: 392,
                 title: "feat(clipboard): copy links with OSC 52".into(),
+                branch: "osc52-copy".into(),
                 author: "octocat".into(),
                 url: url(392),
                 merged_at: ago(700),
@@ -273,6 +280,7 @@ fn sections() -> prowl::Sections {
             ReviewedMergedRow {
                 number: 386,
                 title: "fix(queue): count checks from the rollup aggregates".into(),
+                branch: "queue-check-counts".into(),
                 author: "hubot".into(),
                 url: url(386),
                 merged_at: ago(2_400),

@@ -90,6 +90,7 @@ mod tests {
         MergedRow {
             number,
             title: format!("PR {number}"),
+            branch: format!("b/{number}"),
             url: format!("https://x/{number}"),
             release: None,
             merged_at: Some("2026-06-19T00:00:00Z".to_string()),

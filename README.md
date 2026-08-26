@@ -33,9 +33,12 @@ next to how long they've been queued and how long that build has been running.
 
 On a TTY prowl uses Nerd Font icons; with `--ascii` (or when piped) the
 mergeability glyph falls back to `y` ready, `n` blocked, `!` conflicts, `?`
-unknown. `--branch` adds the PR's head branch as a column, and `--no-draft`
-hides drafts. Each PR number is a clickable link to the PR. Long titles are
-truncated (with a `⋯`) and the whole view is kept within 120 columns.
+unknown. `--branch` adds the head branch to every PR table, and `--no-draft`
+hides drafts. Each PR number is a clickable link to the PR. Tables use the full
+terminal width, giving most space to the title and then the optional branch. As
+the terminal gets narrower, detail columns disappear from the right;
+`+ resize for more` in the footer means a wider or taller terminal would reveal
+more information.
 
 ## Install
 
@@ -72,9 +75,13 @@ screen, so quitting hands your shell back exactly as you left it. A footer glued
 to the bottom of the screen (`r refresh (every 5m) - tab switch view - enter open
 - y copy - / search - ? help`) shows the keys and the refresh interval. While a
 refresh is in flight the hint reads `r refreshing` and `r` presses are ignored
-until it finishes. The sections scroll under the footer, following your
-selection. The legend is contextual to the active view: mergeability glyphs for
-your PRs, review glyphs for your reviews.
+until it finishes. When height is limited, prowl first hides the help legend,
+then lower-priority sections. In the PR view it hides shipments, the merge
+queue, and merged PRs in that order; in the reviews view it hides
+reviewed-and-merged PRs. The open PR section is always kept whole. If that
+section or the minimum useful columns do not fit, prowl shows
+`Terminal too small.` The legend is contextual to the active view:
+mergeability glyphs for your PRs, review glyphs for your reviews.
 
 Move the selection cursor through the listed PRs and releases with `j`/`k` (or
 `↓`/`↑`), `g`/`G` for the first/last row, and `Ctrl-D`/`Ctrl-U` to jump half a

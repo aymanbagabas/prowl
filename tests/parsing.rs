@@ -61,7 +61,7 @@ fn queue_counts_speculative_build_checks() {
     // #103's speculative commit has no checks at all.
     assert_eq!(rows[2].checks, Checks::default());
 
-    let out = render::render_table(&queue::to_table(&rows, true), false);
+    let out = render::render_table(&queue::to_table(&rows, true, false), false);
     assert!(out.contains("FAIL"));
     assert!(out.contains("RUN"));
     assert!(out.contains("PASS"));
@@ -94,10 +94,10 @@ fn queue_styled_render_uses_palette_and_links() {
 
     let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
     let rows = queue::build_rows(model_queue_nodes(data), "caarlos0");
-    let table = queue::to_table(&rows, false);
+    let table = queue::to_table(&rows, false, false);
 
-    let mut canvas = TextBuffer::new(render::MAX_WIDTH as u16, 8);
-    render::paint_table(&mut canvas, &table, 40, false, 0);
+    let mut canvas = TextBuffer::new(render::OUTPUT_WIDTH as u16, 8);
+    render::paint_table(&mut canvas, &table, false, 0);
     let mut buf = Vec::new();
     canvas.encode_with(&mut buf, Profile::TrueColor).unwrap();
     let out = String::from_utf8(buf).unwrap();
@@ -314,7 +314,7 @@ fn reviews_parse_dedupe_and_derive_states() {
 fn reviews_open_render_uses_palette_and_links() {
     let data: ReviewsData = parse(include_str!("fixtures/reviews.json"));
     let rows = reviews::build_open_rows(data);
-    let out = render::render_table(&reviews::open_to_table(&rows, false), true);
+    let out = render::render_table(&reviews::open_to_table(&rows, false, false), true);
     // The Awaiting glyph is yellow (#f9e2af); PR numbers are OSC-8 hyperlinks
     // carrying a per-URL `id=` param.
     assert!(out.contains("38;2;249;226;175"), "expected awaiting yellow");
@@ -326,7 +326,7 @@ fn reviews_open_render_uses_palette_and_links() {
 fn reviews_ascii_state_letters() {
     let data: ReviewsData = parse(include_str!("fixtures/reviews.json"));
     let rows = reviews::build_open_rows(data);
-    let table = reviews::open_to_table(&rows, true); // ascii
+    let table = reviews::open_to_table(&rows, true, false); // ascii
     // Column 0 is the margin; column 1 is the review-state glyph.
     let st: Vec<&str> = table.rows.iter().map(|r| r[1].text.as_str()).collect();
     assert_eq!(st, vec!["a", "@", "^", "v"]); // awaiting, re-review, updated, reviewed

@@ -77,7 +77,7 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = ReviewScope::All, value_name = "SCOPE")]
     pub review_scope: ReviewScope,
 
-    /// Show each open PR's head branch in an extra BRANCH column.
+    /// Show each PR's head branch in a BRANCH column.
     #[arg(long)]
     pub branch: bool,
 

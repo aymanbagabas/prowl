@@ -15,6 +15,8 @@ pub struct QueueRow {
     pub number: i64,
     pub author: String,
     pub title: String,
+    #[serde(default)]
+    pub branch: String,
     pub url: String,
     pub mine: bool,
     /// When the entry joined the queue (WAIT = now - this).
@@ -43,6 +45,7 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
                 mine: author == me,
                 author,
                 title: n.pull_request.title,
+                branch: n.pull_request.head_ref_name.unwrap_or_default(),
                 url: n.pull_request.url,
                 enqueued_at: n.enqueued_at,
                 build_started_at,
@@ -54,7 +57,7 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
     rows
 }
 
-pub fn to_table(rows: &[QueueRow], ascii: bool) -> Table {
+pub fn to_table(rows: &[QueueRow], ascii: bool, show_branch: bool) -> Table {
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let (meta, pr, author_style, title) = if r.mine {
@@ -75,11 +78,16 @@ pub fn to_table(rows: &[QueueRow], ascii: bool) -> Table {
             Some(ts) => timefmt::age_of(Some(ts)),
             None => "\u{2014}".to_string(),
         };
-        out.push(vec![
+        let mut row = vec![
             Cell::plain(" "),
             Cell::styled(r.position.to_string(), &meta),
             Cell::pr(r.number, r.url.clone(), &pr),
             Cell::styled(r.title.clone(), &title),
+        ];
+        if show_branch {
+            row.push(Cell::styled(r.branch.clone(), Style::new().faint()));
+        }
+        row.extend([
             Cell::styled(author, &author_style),
             Cell::styled(wait, &meta),
             Cell::styled(build, &meta),
@@ -87,13 +95,17 @@ pub fn to_table(rows: &[QueueRow], ascii: bool) -> Table {
             render::lamp_cell(r.checks.running, Lamp::Running),
             render::lamp_cell(r.checks.pass, Lamp::Pass),
         ]);
+        out.push(row);
     }
+    let mut header = vec!["", "#", "PR", "TITLE"];
+    if show_branch {
+        header.push("BRANCH");
+    }
+    header.extend(["AUTHOR", "WAIT", "BUILD", "FAIL", "RUN", "PASS"]);
     Table {
         // A leading (always-blank) marker column keeps the queue aligned with
         // the Open PRs and Merged PRs tables, which lead with the change marker.
-        header: vec![
-            "", "#", "PR", "TITLE", "AUTHOR", "WAIT", "BUILD", "FAIL", "RUN", "PASS",
-        ],
+        header,
         rows: out,
     }
 }
@@ -112,6 +124,7 @@ mod tests {
                 number,
                 title: format!("PR {number}"),
                 url: format!("https://x/{number}"),
+                head_ref_name: Some(format!("branch-{number}")),
                 author: Some(Login {
                     login: login.to_string(),
                 }),
@@ -146,6 +159,9 @@ mod tests {
         );
         assert_eq!(rows[0].position, 1);
         assert!(rows[0].mine);
+        assert_eq!(rows[0].branch, "branch-10");
+        assert!(!to_table(&rows, true, false).header.contains(&"BRANCH"));
+        assert!(to_table(&rows, true, true).header.contains(&"BRANCH"));
         assert_eq!(rows[1].position, 2);
         assert!(!rows[1].mine);
     }
@@ -192,7 +208,7 @@ mod tests {
         assert!(rows[0].build_started_at.is_none());
 
         // ...and both render as a dash in the BUILD column.
-        let out = render::render_table(&to_table(&rows, true), false);
+        let out = render::render_table(&to_table(&rows, true, false), false);
         assert!(out.contains("WAIT"));
         assert!(out.contains("BUILD"));
         assert!(out.contains('\u{2014}'));

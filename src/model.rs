@@ -28,7 +28,7 @@ pub const QUEUE_QUERY: &str = r#"query($owner: String!, $name: String!) {
               }
             }
           }
-          pullRequest { number title url author { login } }
+          pullRequest { number title url headRefName author { login } }
         }
       }
     }
@@ -153,6 +153,8 @@ pub struct QueuePr {
     pub number: i64,
     pub title: String,
     pub url: String,
+    #[serde(rename = "headRefName")]
+    pub head_ref_name: Option<String>,
     pub author: Option<Login>,
 }
 
@@ -232,7 +234,7 @@ pub struct PrNode {
     pub is_draft: bool,
     #[serde(rename = "updatedAt")]
     pub updated_at: Option<String>,
-    /// The PR's head branch, shown by `--branch`.
+    /// The PR's head branch.
     #[serde(rename = "headRefName")]
     pub head_ref_name: Option<String>,
     #[serde(rename = "mergeQueueEntry")]
@@ -366,6 +368,8 @@ pub struct MergedNode {
     pub number: i64,
     pub title: String,
     pub url: String,
+    #[serde(rename = "headRefName")]
+    pub head_ref_name: Option<String>,
     /// PR author; used by the reviewed-and-merged section (the Mine merged
     /// section ignores it, since those are all the viewer's own PRs).
     pub author: Option<Login>,
@@ -383,7 +387,7 @@ pub fn merged_query(limit: usize) -> String {
   search(type: ISSUE, first: {first}, query: $q) {{
     nodes {{
       ... on PullRequest {{
-        number title url mergedAt author {{ login }}
+        number title url headRefName mergedAt author {{ login }}
       }}
     }}
   }}
@@ -448,7 +452,7 @@ pub const REVIEWS_QUERY: &str = r#"query($me: String!, $requested: String!, $rev
   reviewed: search(type: ISSUE, first: 50, query: $reviewed) { nodes { ...rev } }
 }
 fragment rev on PullRequest {
-  number title url isDraft updatedAt
+  number title url headRefName isDraft updatedAt
   author { login }
   commits(last: 1) { nodes { commit { committedDate } } }
   reviews(author: $me, first: 20, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) { nodes { submittedAt } }
@@ -472,6 +476,8 @@ pub struct ReviewPrNode {
     pub number: i64,
     pub title: String,
     pub url: String,
+    #[serde(rename = "headRefName")]
+    pub head_ref_name: Option<String>,
     #[serde(rename = "isDraft")]
     pub is_draft: bool,
     #[serde(rename = "updatedAt")]
@@ -535,4 +541,17 @@ pub fn fetch_reviews(
         REVIEWS_QUERY,
         serde_json::json!({ "me": me, "requested": requested, "reviewed": reviewed }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_pr_query_requests_the_head_branch() {
+        assert!(QUEUE_QUERY.contains("headRefName"));
+        assert!(MINE_QUERY.contains("headRefName"));
+        assert!(merged_query(20).contains("headRefName"));
+        assert!(REVIEWS_QUERY.contains("headRefName"));
+    }
 }

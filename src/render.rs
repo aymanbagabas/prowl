@@ -19,12 +19,18 @@ use uncurses::layout::{Position, Rect};
 use uncurses::style::Style;
 use uncurses::text::{Encode, TextSurface};
 
-/// The whole dashboard is kept within this many display columns; the flexible
-/// title column is truncated (with an ellipsis) to make every table fit.
-pub const MAX_WIDTH: usize = 120;
+/// Width used for piped output and screenshot rendering, where there is no live
+/// terminal surface to size against.
+pub const OUTPUT_WIDTH: usize = 120;
+
+/// Below this width there is not enough room for a useful PR row after every
+/// optional column has been removed.
+pub const MIN_WIDTH: u16 = 24;
 
 /// Two blank columns separate adjacent table columns.
 const SEP: usize = 2;
+const TITLE_MIN: usize = 5;
+const BRANCH_MIN: usize = 6;
 
 /// One lamp of the check semaphore: dim when zero, its palette color (bold)
 /// when not, so only the counts that matter catch the eye.
@@ -125,61 +131,238 @@ fn col_width(s: &impl TextSurface, table: &Table, c: usize) -> usize {
     w
 }
 
-/// The width of every column of `table` except `skip`, plus the separators —
-/// i.e. how wide a row is without its flexible column.
-fn fixed_width(s: &impl TextSurface, table: &Table, skip: usize) -> usize {
-    let cols = table.header.len();
-    let total: usize = (0..cols)
-        .filter(|&c| c != skip)
-        .map(|c| col_width(s, table, c))
-        .sum();
-    total + SEP * cols.saturating_sub(1)
+struct TableLayout {
+    columns: Vec<usize>,
+    widths: Vec<usize>,
 }
 
-/// The shared `TITLE` column width across `tables`, capped so the widest row of
-/// every table fits within [`MAX_WIDTH`]. Pass this to [`paint_table`] so the
-/// section tables line up and the whole view stays within the budget.
-pub fn title_width(s: &impl TextSurface, tables: &[&Table]) -> usize {
-    let mut natural = 0;
-    let mut fixed = 0;
-    for t in tables {
-        if let Some(ti) = t.header.iter().position(|h| *h == "TITLE") {
-            natural = natural.max(col_width(s, t, ti));
-            fixed = fixed.max(fixed_width(s, t, ti));
+pub struct TableAlignment {
+    prefix_widths: Vec<usize>,
+    title_width: Option<usize>,
+    hide_branch: bool,
+}
+
+fn aligned_col_width(
+    s: &impl TextSurface,
+    table: &Table,
+    column: usize,
+    title: usize,
+    alignment: Option<&TableAlignment>,
+) -> usize {
+    alignment
+        .and_then(|a| {
+            (column < title)
+                .then(|| a.prefix_widths.get(column))
+                .flatten()
+        })
+        .copied()
+        .unwrap_or_else(|| col_width(s, table, column))
+}
+
+/// Lay a table out across the full surface width. Columns to the right of TITLE
+/// disappear from right to left until the table fits. TITLE is the largest
+/// flexible column and BRANCH is second.
+fn table_layout(
+    s: &impl TextSurface,
+    table: &Table,
+    alignment: Option<&TableAlignment>,
+) -> Option<TableLayout> {
+    let available = usize::from(s.bounds().width);
+    let title = table.header.iter().position(|h| *h == "TITLE");
+    let Some(title) = title else {
+        let columns: Vec<usize> = (0..table.header.len()).collect();
+        let widths = columns.iter().map(|&c| col_width(s, table, c)).collect();
+        return Some(TableLayout { columns, widths });
+    };
+    let branch = table.header.iter().position(|h| *h == "BRANCH");
+    let mut shown = vec![true; table.header.len()];
+    if alignment.is_some_and(|a| a.hide_branch)
+        && let Some(branch) = branch
+    {
+        shown[branch] = false;
+    }
+
+    loop {
+        let columns: Vec<usize> = (0..table.header.len()).filter(|&c| shown[c]).collect();
+        let separators = SEP * columns.len().saturating_sub(1);
+        let fixed: usize = columns
+            .iter()
+            .filter(|&&c| c != title && Some(c) != branch)
+            .map(|&c| aligned_col_width(s, table, c, title, alignment))
+            .sum();
+        let shown_branch = branch.filter(|&c| shown[c]);
+        let branch_min = shown_branch.map_or(0, |_| BRANCH_MIN);
+        let title_min = if shown_branch.is_some() {
+            TITLE_MIN.max(BRANCH_MIN + 1)
+        } else {
+            TITLE_MIN
+        };
+        if fixed + separators + title_min + branch_min <= available {
+            let flexible = available - fixed - separators;
+            let (title_width, branch_width) = if branch_min == 0 {
+                (flexible, None)
+            } else if let Some(title_width) = alignment.and_then(|a| a.title_width) {
+                (title_width, Some(flexible - title_width))
+            } else {
+                let natural = col_width(s, table, shown_branch.expect("shown branch has a column"));
+                let branch_width = natural.clamp(BRANCH_MIN, ((flexible - 1) / 2).max(BRANCH_MIN));
+                (flexible - branch_width, Some(branch_width))
+            };
+            let widths = columns
+                .iter()
+                .map(|&c| {
+                    if c == title {
+                        title_width
+                    } else if Some(c) == branch {
+                        branch_width.expect("shown branch has a width")
+                    } else {
+                        aligned_col_width(s, table, c, title, alignment)
+                    }
+                })
+                .collect();
+            return Some(TableLayout { columns, widths });
+        }
+
+        // Detail columns disappear from the right edge first. BRANCH sits
+        // immediately after TITLE in every PR table, so it survives all other
+        // optional metadata and is the last optional column removed.
+        if let Some(c) = ((title + 1)..table.header.len())
+            .rev()
+            .find(|&c| shown[c] && Some(c) != branch)
+        {
+            shown[c] = false;
+        } else {
+            let c = branch.filter(|&c| shown[c])?;
+            shown[c] = false;
         }
     }
-    natural.min(MAX_WIDTH.saturating_sub(fixed))
 }
 
-/// Paint `table` onto `s` starting at row `top`, forcing the `TITLE` column to
-/// `title_w` columns when present (titles longer than that are ellipsized).
-/// Columns are left-aligned and separated by two blank columns; the header row
-/// is bold. Returns the next free row.
-pub fn paint_table(
+/// Shared left-column widths for a set of section tables. Every table uses the
+/// widest gutter and PR columns. When BRANCH is present, TITLE also uses one
+/// shared width so every branch starts at the same cell.
+pub fn table_alignment(s: &impl TextSurface, tables: &[&Table]) -> TableAlignment {
+    let prefix_len = tables
+        .iter()
+        .filter_map(|table| table.header.iter().position(|h| *h == "TITLE"))
+        .max()
+        .unwrap_or(0);
+    let prefix_widths = (0..prefix_len)
+        .map(|column| {
+            tables
+                .iter()
+                .filter(|table| column < table.header.len())
+                .map(|table| col_width(s, table, column))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let mut alignment = TableAlignment {
+        prefix_widths,
+        title_width: None,
+        hide_branch: false,
+    };
+    let layouts: Vec<Option<TableLayout>> = tables
+        .iter()
+        .map(|table| table_layout(s, table, Some(&alignment)))
+        .collect();
+    if !tables.iter().any(|table| table.header.contains(&"BRANCH")) {
+        return alignment;
+    }
+    alignment.hide_branch = tables.iter().zip(&layouts).any(|(table, layout)| {
+        let has_branch = table.header.contains(&"BRANCH");
+        has_branch
+            && !layout.as_ref().is_some_and(|layout| {
+                layout
+                    .columns
+                    .iter()
+                    .any(|&column| table.header[column] == "BRANCH")
+            })
+    });
+    if alignment.hide_branch {
+        return alignment;
+    }
+    alignment.title_width = tables
+        .iter()
+        .zip(layouts)
+        .filter_map(|(table, layout)| {
+            let title = table.header.iter().position(|h| *h == "TITLE")?;
+            let layout = layout?;
+            let position = layout.columns.iter().position(|&column| column == title)?;
+            Some(layout.widths[position])
+        })
+        .min();
+    alignment
+}
+
+/// Whether the mandatory columns of `table` fit on `s` after every optional
+/// column has been hidden.
+pub fn table_fits(s: &impl TextSurface, table: &Table) -> bool {
+    let alignment = table_alignment(s, &[table]);
+    table_fits_aligned(s, table, &alignment)
+}
+
+pub fn table_fits_aligned(s: &impl TextSurface, table: &Table, alignment: &TableAlignment) -> bool {
+    table_layout(s, table, Some(alignment)).is_some()
+}
+
+/// Whether a wider surface would reveal a hidden column or more text in TITLE
+/// or BRANCH.
+pub fn table_is_compact(s: &impl TextSurface, table: &Table) -> bool {
+    let alignment = table_alignment(s, &[table]);
+    table_is_compact_aligned(s, table, &alignment)
+}
+
+pub fn table_is_compact_aligned(
+    s: &impl TextSurface,
+    table: &Table,
+    alignment: &TableAlignment,
+) -> bool {
+    table_layout(s, table, Some(alignment)).is_some_and(|layout| {
+        layout.columns.len() < table.header.len()
+            || layout
+                .columns
+                .iter()
+                .zip(&layout.widths)
+                .any(|(&column, &width)| {
+                    matches!(table.header[column], "TITLE" | "BRANCH")
+                        && col_width(s, table, column) > width
+                })
+    })
+}
+
+/// Paint `table` onto `s` starting at row `top`. Columns are left-aligned and
+/// separated by two blank columns; the header row is bold. Returns the next
+/// free row.
+pub fn paint_table(s: &mut impl TextSurface, table: &Table, ascii: bool, top: u16) -> u16 {
+    let alignment = table_alignment(s, &[table]);
+    paint_table_aligned(s, table, &alignment, ascii, top)
+}
+
+pub fn paint_table_aligned(
     s: &mut impl TextSurface,
     table: &Table,
-    title_w: usize,
+    alignment: &TableAlignment,
     ascii: bool,
     top: u16,
 ) -> u16 {
-    let cols = table.header.len();
+    let Some(layout) = table_layout(s, table, Some(alignment)) else {
+        return top;
+    };
     let title_idx = table.header.iter().position(|h| *h == "TITLE");
-
-    let mut widths: Vec<usize> = (0..cols).map(|c| col_width(s, table, c)).collect();
-    if let Some(ti) = title_idx {
-        widths[ti] = title_w;
-    }
+    let branch_idx = table.header.iter().position(|h| *h == "BRANCH");
 
     // Column start positions: running sum of widths plus the separators.
-    let mut xs = vec![0u16; cols];
+    let mut xs = Vec::with_capacity(layout.columns.len());
     let mut acc = 0usize;
-    for i in 0..cols {
-        xs[i] = acc as u16;
-        acc += widths[i] + SEP;
+    for width in &layout.widths {
+        xs.push(acc as u16);
+        acc += width + SEP;
     }
 
     let bold = Style::new().bold();
-    for (i, h) in table.header.iter().enumerate() {
+    for (i, &column) in layout.columns.iter().enumerate() {
+        let h = table.header[column];
         if !h.is_empty() {
             s.set_str((xs[i], top), h, &bold);
         }
@@ -187,9 +370,12 @@ pub fn paint_table(
 
     for (r, row) in table.rows.iter().enumerate() {
         let y = top + 1 + r as u16;
-        for (i, cell) in row.iter().enumerate() {
-            let text = if Some(i) == title_idx {
-                truncate(&cell.text, widths[i], ascii)
+        for (i, &column) in layout.columns.iter().enumerate() {
+            let Some(cell) = row.get(column) else {
+                continue;
+            };
+            let text = if Some(column) == title_idx || Some(column) == branch_idx {
+                truncate(&cell.text, layout.widths[i], ascii)
             } else {
                 cell.text.clone()
             };
@@ -206,9 +392,8 @@ pub fn paint_table(
 #[must_use]
 pub fn render_table(table: &Table, styled: bool) -> String {
     let height = table.rows.len() as u16 + 1;
-    let mut buf = TextBuffer::new(MAX_WIDTH as u16, height);
-    let title_w = title_width(&buf, &[table]);
-    paint_table(&mut buf, table, title_w, !styled, 0);
+    let mut buf = TextBuffer::new(OUTPUT_WIDTH as u16, height);
+    paint_table(&mut buf, table, !styled, 0);
     let mut out = Vec::new();
     let profile = if styled {
         Profile::TrueColor
@@ -310,6 +495,7 @@ pub fn paint_footer(
     s: &mut impl TextSurface,
     interval: &str,
     refreshing: bool,
+    more: bool,
     ascii: bool,
     y: u16,
 ) -> u16 {
@@ -318,7 +504,7 @@ pub fn paint_footer(
     } else {
         format!("refresh (every {interval})")
     };
-    let hints = [
+    let mut hints = vec![
         ("r", refresh.as_str()),
         ("tab", "switch view"),
         ("enter", "open"),
@@ -326,6 +512,9 @@ pub fn paint_footer(
         ("/", "search"),
         ("?", "help"),
     ];
+    if more {
+        hints.insert(0, ("+", "resize for more"));
+    }
     if ascii {
         let line = hints
             .iter()
@@ -667,7 +856,7 @@ mod tests {
             ],
         };
         let out = encode(20, 3, Profile::Disabled, |b| {
-            paint_table(b, &table, 5, true, 0);
+            paint_table(b, &table, true, 0);
         });
         // Header, then two rows; columns line up by display width, no escapes.
         assert_eq!(out, "PR   TITLE\r\n#1   short\r\n#42  x");
@@ -686,7 +875,7 @@ mod tests {
             ],
         };
         let out = encode(10, 3, Profile::Disabled, |b| {
-            paint_table(b, &table, 0, true, 0);
+            paint_table(b, &table, true, 0);
         });
         let lines: Vec<&str> = out.split("\r\n").collect();
         let col = |line: &str| line.find('#').map_or("", |i| &line[..i]).chars().count();
@@ -701,7 +890,7 @@ mod tests {
             rows: vec![vec![Cell::link("https://x/1", "https://x/1")]],
         };
         let out = encode(12, 2, Profile::TrueColor, |b| {
-            paint_table(b, &table, 0, false, 0);
+            paint_table(b, &table, false, 0);
         });
         // OSC-8 framing: the opener carries a per-URL `id=` param, the closer is
         // empty; dim + underline SGR.
@@ -726,7 +915,7 @@ mod tests {
             rows: vec![vec![Cell::link("https://x/1", "https://x/1")]],
         };
         let out = encode(12, 2, Profile::Disabled, |b| {
-            paint_table(b, &table, 0, false, 0);
+            paint_table(b, &table, false, 0);
         });
         assert!(!out.contains('\x1b'));
         assert!(out.contains("https://x/1"));
@@ -735,7 +924,7 @@ mod tests {
     #[test]
     fn footer_is_plain_or_styled_key_hints() {
         let plain = encode(80, 1, Profile::Disabled, |b| {
-            paint_footer(b, "5m", false, true, 0);
+            paint_footer(b, "5m", false, false, true, 0);
         });
         assert_eq!(
             plain,
@@ -744,18 +933,23 @@ mod tests {
 
         // While a refresh is in flight the first hint says so instead.
         let refreshing = encode(80, 1, Profile::Disabled, |b| {
-            paint_footer(b, "5m", true, true, 0);
+            paint_footer(b, "5m", true, false, true, 0);
         });
         assert!(refreshing.starts_with("r refreshing"));
 
         let styled = encode(80, 1, Profile::TrueColor, |b| {
-            paint_footer(b, "5m", false, false, 0);
+            paint_footer(b, "5m", false, false, false, 0);
         });
         assert!(styled.contains("refresh (every 5m)"));
         assert!(styled.contains("help"));
         // Bold key accent (combined with the muted color) and a dim label.
         assert!(styled.contains("\x1b[1;"));
         assert!(styled.contains("\x1b[2m"));
+
+        let compact = encode(80, 1, Profile::Disabled, |b| {
+            paint_footer(b, "5m", false, true, true, 0);
+        });
+        assert!(compact.starts_with("+ resize for more - r refresh"));
     }
 
     #[test]
@@ -766,25 +960,131 @@ mod tests {
     }
 
     #[test]
-    fn title_column_is_capped_to_max_width() {
+    fn title_and_branch_fill_the_available_width() {
         let long = "x".repeat(200);
         let table = Table {
-            header: vec!["", "PR", "TITLE", "BASE"],
+            header: vec!["", "PR", "TITLE", "BRANCH", "BASE"],
             rows: vec![vec![
                 Cell::plain(" "),
                 Cell::plain("#1"),
                 Cell::plain(long),
+                Cell::plain("feature/a-very-long-branch"),
                 Cell::plain("main"),
             ]],
         };
-        let mut canvas = TextBuffer::new(MAX_WIDTH as u16, 2);
-        let tw = title_width(&canvas, &[&table]);
-        paint_table(&mut canvas, &table, tw, false, 0);
+        let mut canvas = TextBuffer::new(OUTPUT_WIDTH as u16, 2);
+        paint_table(&mut canvas, &table, false, 0);
         let out = canvas.display_with(Profile::Disabled).to_string();
         for line in out.split("\r\n") {
-            assert!(line.chars().count() <= MAX_WIDTH, "line exceeds MAX_WIDTH");
+            assert!(
+                line.chars().count() <= OUTPUT_WIDTH,
+                "line exceeds surface width"
+            );
         }
-        // The title was truncated with the ellipsis.
+        // The long title was truncated with an ellipsis.
         assert!(out.contains('\u{22ef}'));
+    }
+
+    #[test]
+    fn narrow_tables_hide_detail_columns_before_branch() {
+        let table = Table {
+            header: vec!["", "PR", "TITLE", "BRANCH", "AUTHOR", "UPDATED"],
+            rows: vec![vec![
+                Cell::plain(" "),
+                Cell::plain("#1"),
+                Cell::plain("a title"),
+                Cell::plain("feature/one"),
+                Cell::plain("monalisa"),
+                Cell::plain("2h"),
+            ]],
+        };
+
+        let out = encode(24, 2, Profile::Disabled, |b| {
+            paint_table(b, &table, true, 0);
+        });
+        assert!(out.contains("TITLE"));
+        assert!(out.contains("BRANCH"));
+        assert!(!out.contains("AUTHOR"));
+        assert!(!out.contains("UPDATED"));
+    }
+
+    #[test]
+    fn title_stays_larger_than_branch_at_minimum_width() {
+        let table = Table {
+            header: vec!["", "PR", "TITLE", "BRANCH"],
+            rows: vec![vec![
+                Cell::plain(" "),
+                Cell::plain("#1"),
+                Cell::plain("short"),
+                Cell::plain("feature/a-long-branch"),
+            ]],
+        };
+        let canvas = TextBuffer::new(MIN_WIDTH, 2);
+        let layout = table_layout(&canvas, &table, None).expect("minimum width should fit");
+        let title = layout
+            .columns
+            .iter()
+            .position(|&column| table.header[column] == "TITLE")
+            .expect("title column");
+        let branch = layout
+            .columns
+            .iter()
+            .position(|&column| table.header[column] == "BRANCH")
+            .expect("branch column");
+        assert!(layout.widths[title] > layout.widths[branch]);
+    }
+
+    #[test]
+    fn mandatory_columns_can_report_terminal_too_small() {
+        let table = Table {
+            header: vec!["PR", "TITLE", "BRANCH"],
+            rows: vec![vec![
+                Cell::plain("#12345678901234567890"),
+                Cell::plain("title"),
+                Cell::plain("branch"),
+            ]],
+        };
+        let canvas = TextBuffer::new(MIN_WIDTH, 2);
+        assert!(!table_fits(&canvas, &table));
+    }
+
+    #[test]
+    fn alignment_keeps_pr_title_and_branch_starts_equal() {
+        let table =
+            |marker: &'static str, number: &str, title: &str, branch: &str, tail: &'static str| {
+                Table {
+                    header: vec!["", marker, "PR", "TITLE", "BRANCH", tail],
+                    rows: vec![vec![
+                        Cell::plain(" "),
+                        Cell::plain(" "),
+                        Cell::plain(number),
+                        Cell::plain(title),
+                        Cell::plain(branch),
+                        Cell::plain("x"),
+                    ]],
+                }
+            };
+        let first = table("", "#1", "first title", "b/first", "FAIL");
+        let second = table("#", "#200", "second title", "b/second", "AUTHOR");
+        let third = table("", "#30", "third title", "b/third", "MERGED");
+        let mut canvas = TextBuffer::new(80, 6);
+        let alignment = table_alignment(&canvas, &[&first, &second, &third]);
+        paint_table_aligned(&mut canvas, &first, &alignment, true, 0);
+        paint_table_aligned(&mut canvas, &second, &alignment, true, 2);
+        paint_table_aligned(&mut canvas, &third, &alignment, true, 4);
+
+        let output = canvas.display_with(Profile::Disabled).to_string();
+        let lines: Vec<&str> = output.lines().collect();
+        let starts = |line: &str, values: [&str; 3]| {
+            values.map(|value| line.find(value).expect("painted cell"))
+        };
+        assert_eq!(
+            starts(lines[1], ["#1", "first title", "b/first"]),
+            starts(lines[3], ["#200", "second title", "b/second"])
+        );
+        assert_eq!(
+            starts(lines[1], ["#1", "first title", "b/first"]),
+            starts(lines[5], ["#30", "third title", "b/third"])
+        );
     }
 }

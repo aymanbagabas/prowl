@@ -27,7 +27,7 @@ The interactive watch runs on the
 loop: it shows an *inline* `Loading...` frame, then enters the **alternate
 screen** once the first fetch lands (or immediately when there's a
 cache to paint), where that bottom block is **pinned** to the last rows and the
-sections scroll under it. Interactive `--once` uses an *inline* surface instead:
+body adapts to the available height. Interactive `--once` uses an *inline* surface instead:
 a `Loading...` frame while the fetch runs (abortable with `q`), then the dashboard
 is left in the terminal. Piped/non-TTY output is plain text printed straight to
 stdout, so the dashboard stays pipe-friendly and URLs can be OSC-8 hyperlinks.
@@ -101,17 +101,23 @@ watch event loop); everything else is testable modules:
   `&mut impl TextSurface` using the surface's own `str_width` (no in-house width
   math) and `set_str` (column gaps are implicit — unpainted cells stay blank, so
   no padding is emitted). `Cell` (text + `Style`, the OSC-8 link folded into the
-  style) / `Table`, `truncate` (uncurses' width-aware truncator), and
-  `title_width` (cap/align the shared `TITLE` column so every table lines up and
-  the whole view stays within `MAX_WIDTH` = 120). Headers (with an optional dim
+  style) / `Table`, `truncate` (uncurses' width-aware truncator), and the
+  responsive table layout. Tables fill the live surface width; `TITLE` is the
+  largest flexible column and optional `BRANCH` is second. As width falls,
+  columns right of `TITLE` disappear from right to left, with `BRANCH` removed
+  last. `TableAlignment` shares the two-column gutter and PR widths across all
+  tables in a view; when branches are shown it also shares TITLE width, so PR,
+  TITLE, and BRANCH all start on the same columns. Below 24 columns the
+  dashboard reports `Terminal too small.` Piped output and screenshots use
+  `OUTPUT_WIDTH` = 120 because they have no live screen dimensions. Headers (with an optional dim
   count badge and trailing note — the queue ETA), the `tabs` view-switcher strip,
   the leading-column `change_marker` and the selected-row highlight
   (`highlight_row` paints the selection background edge to edge across one
   screen row, once the body is painted — so it covers the
   hand-laid-out shipments section too, and the change marker stays visible
   underneath instead of being overwritten by a caret), the key-hint footer
-  (carrying the
-  refresh interval and the `enter open` / `/ search` hints), the search prompt
+  (carrying the refresh interval and the `enter open` / `/ search` hints, plus
+  `+ resize for more` when width or height hides information), the search prompt
   line (the `/` query + match count; it paints no cursor and instead *returns*
   the caret cell, so the watch can park the terminal's real one there), and the
   help legend
@@ -126,10 +132,12 @@ watch event loop); everything else is testable modules:
   It also owns the watch frame's geometry: `compose(screen, body, bottom, rows,
   caret)` fills exactly `rows` rows — as much of the body as fits at the top,
   blank padding, then the bottom block glued to the last rows — and returns the
-  row that block starts on. When the body is taller than the space left over it
-  scrolls, keeping `caret` (the row a view reported the selection landed on)
-  centered; when the bottom block alone overflows it is cut from the start, so
-  the footer survives and the help legend is what goes. The body is drawn through
+  row that block starts on. Before composition, `responsive_layout` hides help,
+  then Mine sections in Shipments → Queue → Merged order (or Reviewed & merged
+  in the Reviews view), while protecting the open-PR section. Navigation,
+  search counts, open, and copy use the same `Visibility`. If the protected
+  section does not fit whole, the frame is replaced by `Terminal too small.`
+  The body is drawn through
   a `uncurses::buffer::View`, which clips without translating, so blitting it maps
   the first visible body row onto the top of the screen.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
@@ -137,9 +145,10 @@ watch event loop); everything else is testable modules:
   columns are `[mark] [M] PR TITLE [BRANCH] FAIL RUN PASS THREADS`: `M` is the
   single mergeability glyph, `FAIL`/`RUN`/`PASS` are the check-run semaphore
   (always all three, dim when zero, colored when not) and `THREADS` the
-  unresolved review threads (`100+` when the page was capped). `--branch` adds
-  `BRANCH` (`prs::without_drafts` backs `--no-draft`). The queue
-  columns are `# PR TITLE AUTHOR WAIT BUILD FAIL RUN PASS` (author truncated to
+  unresolved review threads (`100+` when the page was capped).
+  `--branch` adds `BRANCH` to every PR table; `prs::without_drafts` backs
+  `--no-draft`. The queue
+  columns are `# PR TITLE [BRANCH] AUTHOR WAIT BUILD FAIL RUN PASS` (author truncated to
   `AUTHOR_WIDTH`), where `WAIT` is how long the entry has been queued (now −
   `enqueuedAt`) and `BUILD` is how long its speculative merge commit has been
   building — now − the earliest check-run `startedAt` in the commit's
@@ -153,16 +162,16 @@ watch event loop); everything else is testable modules:
   app integrations). The `Merge Queue` header also carries the queue-level ETA
   (`~11m to merge`, from `mergeQueue.nextEntryEstimatedTimeToMerge`) as a dim
   note. The
-  merged columns are `[mark] PR TITLE RELEASE MERGED` (no per-row glyph — every
-  row there is merged — and no blank stand-in for one either, so the rows start
-  at the same indent as every other section's), where `RELEASE` is the release
+  merged columns are `[mark] [blank] PR TITLE [BRANCH] RELEASE MERGED` (no
+  per-row glyph — every row there is merged — so a blank gutter cell keeps its
+  left columns aligned with every other PR table), where `RELEASE` is the release
   that shipped the PR (a link to its release page) or `—` if not yet shipped,
   looked up from the `commits::ReleaseMap`.
 - `reviews.rs` — the Reviews view's rows/tables. `ReviewRow` (open: `glyph PR
-  TITLE AUTHOR UPDATED`, glyph = the `ReviewState`) via `build_open_rows`
+  TITLE [BRANCH] AUTHOR UPDATED`, glyph = the `ReviewState`) via `build_open_rows`
   (de-dupes the two searches, derives the state, sorts by state rank then
-  `updatedAt`) + `open_to_table`; `ReviewedMergedRow` (`glyph PR TITLE AUTHOR
-  MERGED`) via `build_merged_rows` + `merged_to_table`.
+  `updatedAt`) + `open_to_table`; `ReviewedMergedRow` (`glyph PR TITLE [BRANCH]
+  AUTHOR MERGED`) via `build_merged_rows` + `merged_to_table`.
 - `commits.rs` — "commits by me" counts for the next (unreleased) version and
   the last 4 stable releases (GitHub releases + compare REST APIs); best-effort,
   never fatal. `fetch` returns both the `CommitStats` (rendered as the "My
@@ -278,8 +287,9 @@ still performs all teardown through `finish`.
   queue by `position` asc. Reviews by review-state rank (Awaiting → ReReview →
   Updated → Reviewed) then `updatedAt` desc; reviewed-and-merged by `mergedAt` desc.
 - **Queue dedup:** a PR of mine that's in the merge queue is shown only in the
-  Merge Queue section, not the open-PRs list (`prs::without_queued`, applied when
-  the queue section is shown so `--only mine` still lists it).
+  Merge Queue section, not the open-PRs list (`prs::without_queued`, applied at
+  layout time only while the queue section is visible, so `--only mine` and
+  height-driven queue hiding still list it).
 - **Drafts:** `--no-draft` hides draft PRs from both the Mine open-PRs list and
   the Reviews list (`prs::without_drafts` / `reviews::without_drafts`).
 - **Views / Tab:** two views, `Mine` (default) and `Reviews`, selected for
@@ -311,10 +321,10 @@ still performs all teardown through `finish`.
   `Ctrl-D`/`Ctrl-U` half a page (sized from the screen's `window_cells`); Enter
   opens the selected row — the PR, or a shipments release / the upcoming compare
   log — via `open::url`. Every row across all sections of the active view is one
-  target (`nav::targets`, in render order); switching views drops the cursor and
+  target (`nav::targets_visible`, in render order); switching views drops the cursor and
   a refresh `clamp`s it. `--once`/piped output has no selection.
 - **Copy:** `y` copies the selected row's link, `Y` every link of the section the
-  cursor is in (`nav::section_at`) as a markdown list (`- <url>` per line, no
+  cursor is in (`nav::section_at_visible`) as a markdown list (`- <url>` per line, no
   trailing newline). Both honor the active search filter, so `Y` copies only the
   visible matches; with no cursor yet `Y` takes the first non-empty section. The
   outcome ("copied N links", or a `copy failed:` error) lands on the same dim
@@ -326,7 +336,7 @@ still performs all teardown through `finish`.
   the list) clears it — and with no filter to clear, Esc quits. While the prompt
   is open every keystroke is text (`classify_search`), else keys are normal-mode
   actions (`classify`). `nav::filter` produces the rendered rows and
-  `nav::targets(…, query)` the navigable ones from the **same** predicate, so the
+  `nav::targets_visible(…, query)` the navigable ones from the **same** predicate, so the
   caret/open track the visible matches; the selection resets on each edit. The
   prompt uses the **terminal's own cursor**: `paint_search_prompt` returns the
   caret cell, `paint_dashboard` passes it up only while `searching`, and
@@ -352,8 +362,10 @@ still performs all teardown through `finish`.
   (row / whole section), and `/` filters.
   `q`/`Q`/`Ctrl-C` quit (as does `Esc` with no filter applied) and `Ctrl-Z`
   suspends/resumes. The bottom block — help legend, search prompt, error line,
-  footer — is **pinned** to the last rows of the screen (`render::compose`), and
-  the sections scroll under it, following the selection. The only persistent
+  footer — is **pinned** to the last rows of the screen (`render::compose`).
+  Height pressure hides help, then Shipments, Queue, and Merged in the Mine
+  view, or Reviewed & merged in the Reviews view. Open PRs remain whole; if they
+  cannot fit, the frame says `Terminal too small.` The only persistent
   bottom line is the footer
   (`r refresh (every 5m) - tab switch view - enter open - y copy - / search - ?
   help`), which carries the refresh interval; a failed refresh adds a dim
@@ -378,7 +390,7 @@ still performs all teardown through `finish`.
 ## The GraphQL queries + REST (see `model.rs` / `commits.rs`)
 
 - Merge queue: `repository.mergeQueue.entries` (vars `owner`, `name`), each
-  entry carrying `enqueuedAt` (WAIT) and `headCommit.statusCheckRollup.contexts`
+  entry carrying `headRefName`, `enqueuedAt` (WAIT) and `headCommit.statusCheckRollup.contexts`
   check-run `startedAt` timestamps (BUILD = now − the earliest) plus that same
   connection's `checkRunCountsByState` / `statusContextCountsByState` aggregates
   (the FAIL/RUN/PASS semaphore), plus the queue-level
@@ -389,14 +401,16 @@ still performs all teardown through `finish`.
   aggregate exists, hence the page + a `+` when capped), and the last commit's
   `statusCheckRollup { contexts(first: 1) { checkRunCountsByState
   statusContextCountsByState } }` — the aggregates only, no context nodes.
-- Merged: `search(is:pr is:merged author:<me> merged:>=<since>)` with `mergedAt`
+- Merged: `search(is:pr is:merged author:<me> merged:>=<since>)` with
+  `headRefName` and `mergedAt`
   (fetched `sort:updated-desc`, since search can't sort by merge time, then
   re-sorted by `mergedAt` for display). Now also fetches `author` (used by the
   reviewed-and-merged section; the Mine merged section ignores it).
 - Reviews (one POST, two aliased searches): `requested: search(is:pr is:open
   <scope>:<me> -author:<me>)` and `reviewed: search(is:pr is:open
-  reviewed-by:<me> -author:<me>)`, each node carrying `author`, last commit
-  `committedDate`, and `reviews(author:<me>)` `submittedAt`s. Re-review = a PR
+  reviewed-by:<me> -author:<me>)`, each node carrying `author`, `headRefName`,
+  last commit `committedDate`, and `reviews(author:<me>)` `submittedAt`s.
+  Re-review = a PR
   in both result sets.
 - Reviewed & merged: `search(is:pr is:merged reviewed-by:<me> -author:<me>
   merged:>=<since>)` (reuses the merged query/limit).

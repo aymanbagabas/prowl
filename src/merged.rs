@@ -13,6 +13,8 @@ use uncurses::style::Style;
 pub struct MergedRow {
     pub number: i64,
     pub title: String,
+    #[serde(default)]
+    pub branch: String,
     pub url: String,
     /// The release that shipped this PR, or `None` when it hasn't shipped yet.
     pub release: Option<ReleaseRef>,
@@ -27,6 +29,7 @@ pub fn build_rows(nodes: Vec<MergedNode>, limit: usize, releases: &ReleaseMap) -
         .map(|n| MergedRow {
             number: n.number,
             title: n.title,
+            branch: n.head_ref_name.unwrap_or_default(),
             url: n.url,
             release: releases.get(&n.number).cloned(),
             merged_at: n.merged_at,
@@ -42,7 +45,12 @@ pub fn build_rows(nodes: Vec<MergedNode>, limit: usize, releases: &ReleaseMap) -
     rows
 }
 
-pub fn to_table(rows: &[MergedRow], ascii: bool, highlight: &HashSet<i64>) -> Table {
+pub fn to_table(
+    rows: &[MergedRow],
+    ascii: bool,
+    highlight: &HashSet<i64>,
+    show_branch: bool,
+) -> Table {
     let dim = Style::new().faint();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
@@ -51,18 +59,27 @@ pub fn to_table(rows: &[MergedRow], ascii: bool, highlight: &HashSet<i64>) -> Ta
             Some(rr) => Cell::link(rr.tag.clone(), rr.url.clone()),
             None => Cell::styled("\u{2014}".to_string(), &dim),
         };
-        out.push(vec![
+        let mut row = vec![
             render::change_marker(highlight.contains(&r.number), ascii),
+            Cell::plain(" "),
             Cell::pr(r.number, r.url.clone(), status::fg(BLUE)),
             Cell::plain(r.title.clone()),
+        ];
+        if show_branch {
+            row.push(Cell::styled(r.branch.clone(), &dim));
+        }
+        row.extend([
             release,
             Cell::styled(timefmt::age_of(r.merged_at.as_deref()), &dim),
         ]);
+        out.push(row);
     }
-    Table {
-        header: vec!["", "PR", "TITLE", "RELEASE", "MERGED"],
-        rows: out,
+    let mut header = vec!["", "", "PR", "TITLE"];
+    if show_branch {
+        header.push("BRANCH");
     }
+    header.extend(["RELEASE", "MERGED"]);
+    Table { header, rows: out }
 }
 
 #[cfg(test)]
@@ -74,6 +91,7 @@ mod tests {
             number,
             title: format!("PR {number}"),
             url: format!("https://x/{number}"),
+            head_ref_name: Some(format!("branch-{number}")),
             author: None,
             merged_at: Some(merged_at.to_string()),
         }
@@ -92,7 +110,18 @@ mod tests {
         );
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].number, 2);
+        assert_eq!(rows[0].branch, "branch-2");
         assert_eq!(rows[1].number, 3);
+        assert!(
+            !to_table(&rows, true, &HashSet::new(), false)
+                .header
+                .contains(&"BRANCH")
+        );
+        assert!(
+            to_table(&rows, true, &HashSet::new(), true)
+                .header
+                .contains(&"BRANCH")
+        );
     }
 
     #[test]

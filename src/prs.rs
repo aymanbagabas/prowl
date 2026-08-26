@@ -1,7 +1,7 @@
 //! My-open-PRs view: rows, sorting, styling, and table building.
 //!
 //! One row is: a change marker, a single mergeability glyph (the whole "can I
-//! merge this?" answer), the PR number + title, an optional branch, and then the
+//! merge this?" answer), the PR number + title + branch, and then the
 //! detail group that explains a blocked PR — a failing/running/passing check
 //! semaphore and the unresolved-review-thread count. Conflicts are *only* the
 //! glyph's job, so nothing is reported twice.
@@ -12,15 +12,13 @@ use crate::status::{self, BLUE, Checks, Lamp, Mergeable, PEACH, Status};
 use std::collections::HashSet;
 use uncurses::style::Style;
 
-/// Branch names are truncated to this many display columns.
-const BRANCH_WIDTH: usize = 28;
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrRow {
     pub number: i64,
     pub is_draft: bool,
     pub title: String,
-    /// Head branch, rendered only with `--branch`.
+    /// Head branch.
+    #[serde(default)]
     pub branch: String,
     /// The leading glyph: whether GitHub would let this merge right now.
     pub mergeable: Mergeable,
@@ -114,10 +112,7 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>, show_bran
 
         let mut row = vec![mark, merge, pr, Cell::plain(r.title.clone())];
         if show_branch {
-            row.push(Cell::styled(
-                render::truncate(&r.branch, BRANCH_WIDTH, ascii),
-                &dim,
-            ));
+            row.push(Cell::styled(r.branch.clone(), &dim));
         }
         row.extend([
             render::lamp_cell(r.checks.fail, Lamp::Fail),
@@ -297,16 +292,16 @@ mod tests {
     #[test]
     fn branch_column_is_opt_in() {
         let rows = build_rows(vec![pr(1, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)])]);
-        let plain = to_table(&rows, true, &HashSet::new(), false);
-        assert!(!plain.header.contains(&"BRANCH"));
-        let with_branch = to_table(&rows, true, &HashSet::new(), true);
+        let table = to_table(&rows, true, &HashSet::new(), false);
+        assert!(!table.header.contains(&"BRANCH"));
+        let table = to_table(&rows, true, &HashSet::new(), true);
         assert_eq!(
-            with_branch.header,
+            table.header,
             [
                 "", "", "PR", "TITLE", "BRANCH", "FAIL", "RUN", "PASS", "THREADS"
             ]
         );
-        assert_eq!(with_branch.rows[0][4].text, "branch-1");
+        assert_eq!(table.rows[0][4].text, "branch-1");
     }
 
     #[test]

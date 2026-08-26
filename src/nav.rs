@@ -2,13 +2,13 @@
 //! a view (mirroring the render order) and the selection-cursor movement. Watch
 //! mode only — `--once`/piped output never has a selection.
 
-use crate::Sections;
 use crate::cli::View;
 use crate::commits::CommitStats;
 use crate::merged::MergedRow;
 use crate::prs::PrRow;
 use crate::queue::QueueRow;
 use crate::reviews::{ReviewRow, ReviewedMergedRow};
+use crate::{Sections, Visibility};
 
 /// A row the search can match (its `haystack`) and the cursor can open (`url`).
 trait Searchable {
@@ -86,6 +86,16 @@ fn group<'a, T: Searchable>(rows: Option<&'a [T]>, query: &str) -> Vec<&'a str> 
     urls
 }
 
+fn prs_group<'a>(rows: Option<&'a [PrRow]>, query: &str, queue_visible: bool) -> Vec<&'a str> {
+    rows.map_or_else(Vec::new, |rows| {
+        rows.iter()
+            .filter(|row| !queue_visible || row.queue.is_none())
+            .filter(|row| hit(&row.haystack(), query))
+            .map(Searchable::url)
+            .collect()
+    })
+}
+
 /// The "My Shipments" section's targets: the "upcoming" compare log (when there
 /// is one) then each release page, matched against the already-lowercased
 /// `query`. Empty when the release lookup failed (`available` is false).
@@ -114,18 +124,35 @@ fn shipments<'a>(s: &'a Sections, query: &str) -> Vec<&'a str> {
 /// section and in render order. `targets` is this flattened, so the two can't
 /// drift; `section_at` uses the grouping to answer "every link in the section
 /// the cursor is in".
-fn groups<'a>(view: View, s: &'a Sections, query: &str) -> Vec<Vec<&'a str>> {
+fn groups<'a>(view: View, s: &'a Sections, query: &str, visible: Visibility) -> Vec<Vec<&'a str>> {
     let q = query.to_lowercase();
     match view {
         View::Mine => vec![
-            group(s.prs.as_deref(), &q),
-            group(s.queue.as_deref(), &q),
-            group(s.merged.as_deref(), &q),
-            shipments(s, &q),
+            prs_group(
+                visible.prs.then_some(s.prs.as_deref()).flatten(),
+                &q,
+                visible.queue,
+            ),
+            group(visible.queue.then_some(s.queue.as_deref()).flatten(), &q),
+            group(visible.merged.then_some(s.merged.as_deref()).flatten(), &q),
+            if visible.shipments {
+                shipments(s, &q)
+            } else {
+                Vec::new()
+            },
         ],
         View::Reviews => vec![
-            group(s.reviews.as_deref(), &q),
-            group(s.reviewed_merged.as_deref(), &q),
+            group(
+                visible.reviews.then_some(s.reviews.as_deref()).flatten(),
+                &q,
+            ),
+            group(
+                visible
+                    .reviewed_merged
+                    .then_some(s.reviewed_merged.as_deref())
+                    .flatten(),
+                &q,
+            ),
         ],
     }
 }
@@ -135,21 +162,37 @@ fn groups<'a>(view: View, s: &'a Sections, query: &str) -> Vec<Vec<&'a str>> {
 /// lines up with the rendered (and identically filtered) rows. Rows without a
 /// URL (an "upcoming" shipments row with no commits) are skipped. An empty
 /// `query` yields every row.
-pub(crate) fn targets<'a>(view: View, s: &'a Sections, query: &str) -> Vec<&'a str> {
-    groups(view, s, query).concat()
+#[cfg(test)]
+fn targets<'a>(view: View, s: &'a Sections, query: &str) -> Vec<&'a str> {
+    targets_visible(view, s, query, Visibility::all(s))
+}
+
+pub(crate) fn targets_visible<'a>(
+    view: View,
+    s: &'a Sections,
+    query: &str,
+    visible: Visibility,
+) -> Vec<&'a str> {
+    groups(view, s, query, visible).concat()
 }
 
 /// Every target of the section containing the `index`-th target — what `Y`
 /// copies. Empty sections hold no index, so passing 0 with no selection yields
 /// the first non-empty section; an out-of-range index yields nothing.
-pub(crate) fn section_at<'a>(
+#[cfg(test)]
+fn section_at<'a>(view: View, s: &'a Sections, query: &str, index: usize) -> Vec<&'a str> {
+    section_at_visible(view, s, query, index, Visibility::all(s))
+}
+
+pub(crate) fn section_at_visible<'a>(
     view: View,
     s: &'a Sections,
     query: &str,
     index: usize,
+    visible: Visibility,
 ) -> Vec<&'a str> {
     let mut start = 0;
-    for g in groups(view, s, query) {
+    for g in groups(view, s, query, visible) {
         if index < start + g.len() {
             return g;
         }
@@ -270,6 +313,7 @@ mod tests {
             number: n,
             author: "me".into(),
             title: format!("q {n}"),
+            branch: format!("b/{n}"),
             url: format!("https://q/{n}"),
             mine: true,
             enqueued_at: None,
@@ -282,6 +326,7 @@ mod tests {
         MergedRow {
             number: n,
             title: format!("m {n}"),
+            branch: format!("b/{n}"),
             url: format!("https://m/{n}"),
             release: None,
             merged_at: None,
@@ -358,6 +403,7 @@ mod tests {
             number: 1,
             is_draft: false,
             title: "r".into(),
+            branch: "b/r".into(),
             author: "a".into(),
             url: "https://rev/1".into(),
             state: ReviewState::Awaiting,
@@ -366,6 +412,7 @@ mod tests {
         s.reviewed_merged = Some(vec![ReviewedMergedRow {
             number: 2,
             title: "rm".into(),
+            branch: "b/rm".into(),
             author: "a".into(),
             url: "https://revm/2".into(),
             merged_at: None,
@@ -373,6 +420,50 @@ mod tests {
         assert_eq!(
             targets(View::Reviews, &s, ""),
             vec!["https://rev/1", "https://revm/2"]
+        );
+    }
+
+    #[test]
+    fn hidden_sections_are_not_navigation_targets() {
+        let mut s = empty();
+        s.prs = Some(vec![pr(1)]);
+        s.queue = Some(vec![queued(2)]);
+        s.merged = Some(vec![merged(3)]);
+        let visible = Visibility {
+            prs: true,
+            queue: false,
+            merged: false,
+            shipments: false,
+            reviews: false,
+            reviewed_merged: false,
+        };
+        assert_eq!(
+            targets_visible(View::Mine, &s, "", visible),
+            vec!["https://pr/1"]
+        );
+        assert_eq!(
+            section_at_visible(View::Mine, &s, "", 0, visible),
+            vec!["https://pr/1"]
+        );
+    }
+
+    #[test]
+    fn queued_pr_returns_to_open_targets_when_queue_is_hidden() {
+        let mut queued_pr = pr(1);
+        queued_pr.queue = Some((1, "QUEUED".into()));
+        let mut s = empty();
+        s.prs = Some(vec![queued_pr]);
+        s.queue = Some(vec![queued(1)]);
+
+        let mut visible = Visibility::all(&s);
+        assert_eq!(
+            targets_visible(View::Mine, &s, "", visible),
+            vec!["https://q/1"]
+        );
+        visible.queue = false;
+        assert_eq!(
+            targets_visible(View::Mine, &s, "", visible),
+            vec!["https://pr/1"]
         );
     }
 
@@ -465,6 +556,7 @@ mod tests {
             number: 1,
             is_draft: false,
             title: "r".into(),
+            branch: "b/r".into(),
             author: "a".into(),
             url: "https://rev/1".into(),
             state: ReviewState::Awaiting,
@@ -473,6 +565,7 @@ mod tests {
         s.reviewed_merged = Some(vec![ReviewedMergedRow {
             number: 2,
             title: "rm".into(),
+            branch: "b/rm".into(),
             author: "a".into(),
             url: "https://revm/2".into(),
             merged_at: None,

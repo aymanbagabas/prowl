@@ -17,6 +17,8 @@ pub struct ReviewRow {
     pub number: i64,
     pub is_draft: bool,
     pub title: String,
+    #[serde(default)]
+    pub branch: String,
     pub author: String,
     pub url: String,
     pub state: ReviewState,
@@ -90,6 +92,7 @@ pub fn build_open_rows(data: ReviewsData) -> Vec<ReviewRow> {
                 number: n.number,
                 is_draft: n.is_draft,
                 title: n.title,
+                branch: n.head_ref_name.unwrap_or_default(),
                 author: n.author.map_or_else(|| "ghost".into(), |a| a.login),
                 url: n.url,
                 state,
@@ -112,7 +115,7 @@ pub fn without_drafts(mut rows: Vec<ReviewRow>) -> Vec<ReviewRow> {
     rows
 }
 
-pub fn open_to_table(rows: &[ReviewRow], ascii: bool) -> Table {
+pub fn open_to_table(rows: &[ReviewRow], ascii: bool, show_branch: bool) -> Table {
     let dim = Style::new().faint();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
@@ -126,27 +129,37 @@ pub fn open_to_table(rows: &[ReviewRow], ascii: bool) -> Table {
         } else {
             Cell::pr(r.number, r.url.clone(), status::fg(BLUE))
         };
-        out.push(vec![
+        let mut row = vec![
             // A leading (always-blank) margin column keeps the two reviews
             // tables aligned with each other and the rest of the dashboard.
             Cell::plain(" "),
             st,
             pr,
             Cell::plain(r.title.clone()),
+        ];
+        if show_branch {
+            row.push(Cell::styled(r.branch.clone(), &dim));
+        }
+        row.extend([
             Cell::styled(render::truncate(&r.author, AUTHOR_WIDTH, ascii), &dim),
             Cell::styled(timefmt::age_of(r.updated_at.as_deref()), &dim),
         ]);
+        out.push(row);
     }
-    Table {
-        header: vec!["", "", "PR", "TITLE", "AUTHOR", "UPDATED"],
-        rows: out,
+    let mut header = vec!["", "", "PR", "TITLE"];
+    if show_branch {
+        header.push("BRANCH");
     }
+    header.extend(["AUTHOR", "UPDATED"]);
+    Table { header, rows: out }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReviewedMergedRow {
     pub number: i64,
     pub title: String,
+    #[serde(default)]
+    pub branch: String,
     pub author: String,
     pub url: String,
     pub merged_at: Option<String>,
@@ -160,6 +173,7 @@ pub fn build_merged_rows(nodes: Vec<MergedNode>, limit: usize) -> Vec<ReviewedMe
         .map(|n| ReviewedMergedRow {
             number: n.number,
             title: n.title,
+            branch: n.head_ref_name.unwrap_or_default(),
             author: n.author.map_or_else(|| "ghost".into(), |a| a.login),
             url: n.url,
             merged_at: n.merged_at,
@@ -174,11 +188,11 @@ pub fn build_merged_rows(nodes: Vec<MergedNode>, limit: usize) -> Vec<ReviewedMe
     rows
 }
 
-pub fn merged_to_table(rows: &[ReviewedMergedRow], ascii: bool) -> Table {
+pub fn merged_to_table(rows: &[ReviewedMergedRow], ascii: bool, show_branch: bool) -> Table {
     let dim = Style::new().faint();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        out.push(vec![
+        let mut row = vec![
             // Two blank margin columns keep this table aligned with the open
             // reviews table (marker + state glyph); every row here is merged, so
             // a per-row glyph would say nothing.
@@ -186,14 +200,22 @@ pub fn merged_to_table(rows: &[ReviewedMergedRow], ascii: bool) -> Table {
             Cell::plain(" "),
             Cell::pr(r.number, r.url.clone(), status::fg(BLUE)),
             Cell::plain(r.title.clone()),
+        ];
+        if show_branch {
+            row.push(Cell::styled(r.branch.clone(), &dim));
+        }
+        row.extend([
             Cell::styled(render::truncate(&r.author, AUTHOR_WIDTH, ascii), &dim),
             Cell::styled(timefmt::age_of(r.merged_at.as_deref()), &dim),
         ]);
+        out.push(row);
     }
-    Table {
-        header: vec!["", "", "PR", "TITLE", "AUTHOR", "MERGED"],
-        rows: out,
+    let mut header = vec!["", "", "PR", "TITLE"];
+    if show_branch {
+        header.push("BRANCH");
     }
+    header.extend(["AUTHOR", "MERGED"]);
+    Table { header, rows: out }
 }
 
 #[cfg(test)]
@@ -214,6 +236,7 @@ mod tests {
             number,
             title: format!("PR {number}"),
             url: format!("https://x/{number}"),
+            head_ref_name: Some(format!("branch-{number}")),
             is_draft: false,
             updated_at: Some("2026-06-19T00:00:00Z".to_string()),
             author: Some(Login {
@@ -321,11 +344,15 @@ mod tests {
             reviewed: ReviewSearch { nodes: vec![] },
         };
         let rows = build_open_rows(data);
-        let table = open_to_table(&rows, true);
-        // Columns: [margin, glyph, PR, TITLE, AUTHOR, UPDATED].
+        let without_branch = open_to_table(&rows, true, false);
+        assert!(!without_branch.header.contains(&"BRANCH"));
+        let table = open_to_table(&rows, true, true);
+        // Columns: [margin, glyph, PR, TITLE, BRANCH, AUTHOR, UPDATED].
         assert_eq!(table.rows[0][1].text, "a"); // Awaiting ASCII glyph
         assert_eq!(table.rows[0][2].text, "#1");
-        assert_eq!(table.rows[0][4].text, "alice");
+        assert_eq!(table.rows[0][4].text, "branch-1");
+        assert_eq!(table.rows[0][5].text, "alice");
+        assert!(table.header.contains(&"BRANCH"));
     }
 
     fn merged_node(number: i64, author: &str, merged_at: &str) -> MergedNode {
@@ -333,6 +360,7 @@ mod tests {
             number,
             title: format!("PR {number}"),
             url: format!("https://x/{number}"),
+            head_ref_name: Some(format!("branch-{number}")),
             author: Some(Login {
                 login: author.to_string(),
             }),
@@ -352,7 +380,18 @@ mod tests {
         );
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].number, 2);
+        assert_eq!(rows[0].branch, "branch-2");
         assert_eq!(rows[0].author, "b");
         assert_eq!(rows[1].number, 3);
+        assert!(
+            !merged_to_table(&rows, true, false)
+                .header
+                .contains(&"BRANCH")
+        );
+        assert!(
+            merged_to_table(&rows, true, true)
+                .header
+                .contains(&"BRANCH")
+        );
     }
 }
