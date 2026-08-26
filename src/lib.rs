@@ -139,6 +139,7 @@ struct ResponsiveLayout {
     show_help: bool,
     constrained: bool,
     too_small: bool,
+    required_height: u16,
 }
 
 fn section_height<T>(rows: Option<&[T]>, visible: bool) -> usize {
@@ -225,14 +226,7 @@ fn responsive_layout(
             show_help: ui.show_help,
             constrained: false,
             too_small: false,
-        };
-    }
-    if width < render::MIN_WIDTH {
-        return ResponsiveLayout {
-            visible: Visibility::none(),
-            show_help: false,
-            constrained: true,
-            too_small: true,
+            required_height: 0,
         };
     }
 
@@ -270,7 +264,10 @@ fn responsive_layout(
         }
     }
 
-    let too_small = !fits(visible, show_help);
+    let required_height = (body_height(sections, ui.view, visible, tabs)
+        + bottom_height(ui, status, footer, show_help))
+    .min(usize::from(u16::MAX)) as u16;
+    let too_small = width < render::MIN_WIDTH || required_height > rows;
     ResponsiveLayout {
         visible: if too_small {
             Visibility::none()
@@ -280,6 +277,7 @@ fn responsive_layout(
         show_help,
         constrained: show_help != ui.show_help || visible != all,
         too_small,
+        required_height,
     }
 }
 
@@ -395,15 +393,17 @@ fn paint_section(
 fn table_state(
     s: &impl TextSurface,
     tables: &[&render::Table],
-) -> (render::TableAlignment, bool, bool) {
+) -> (render::TableAlignment, bool, u16) {
     let alignment = render::table_alignment(s, tables);
     let compact = tables
         .iter()
         .any(|table| render::table_is_compact_aligned(s, table, &alignment));
-    let fits = tables
+    let required_width = tables
         .iter()
-        .all(|table| render::table_fits_aligned(s, table, &alignment));
-    (alignment, compact, fits)
+        .map(|table| render::table_required_width(s, table, &alignment))
+        .max()
+        .unwrap_or(0);
+    (alignment, compact, required_width)
 }
 
 /// Whether `table` has a `local`-th row — i.e. whether the selection landed on
@@ -454,7 +454,7 @@ fn paint_mine(
     show_branch: bool,
     visible: Visibility,
     top: u16,
-) -> (u16, Option<u16>, bool, bool) {
+) -> (u16, Option<u16>, bool, u16) {
     let prs_rows = sections.prs.as_deref().filter(|_| visible.prs).map(|rows| {
         if visible.queue {
             Cow::Owned(prs::without_queued(rows.to_vec()))
@@ -482,9 +482,9 @@ fn paint_mine(
         .into_iter()
         .flatten()
         .collect();
-    let (alignment, compact, fits) = table_state(s, &tables);
-    if !fits {
-        return (top, None, compact, false);
+    let (alignment, compact, required_width) = table_state(s, &tables);
+    if s.bounds().width < required_width {
+        return (top, None, compact, required_width);
     }
 
     let np = prs_rows.as_deref().map_or(0, <[prs::PrRow]>::len);
@@ -569,7 +569,7 @@ fn paint_mine(
         y = next + 1;
         caret = caret.or(ship_caret);
     }
-    (y, caret, compact, true)
+    (y, caret, compact, required_width)
 }
 
 /// The Reviews view: PRs to review (with a per-row review-state glyph), then
@@ -583,7 +583,7 @@ fn paint_reviews(
     show_branch: bool,
     visible: Visibility,
     top: u16,
-) -> (u16, Option<u16>, bool, bool) {
+) -> (u16, Option<u16>, bool, u16) {
     let open_table = sections
         .reviews
         .as_ref()
@@ -597,9 +597,9 @@ fn paint_reviews(
         .filter(|r| !r.is_empty())
         .map(|rows| reviews::merged_to_table(rows, ascii, show_branch));
     let tables: Vec<&render::Table> = [&open_table, &merged_table].into_iter().flatten().collect();
-    let (alignment, compact, fits) = table_state(s, &tables);
-    if !fits {
-        return (top, None, compact, false);
+    let (alignment, compact, required_width) = table_state(s, &tables);
+    if s.bounds().width < required_width {
+        return (top, None, compact, required_width);
     }
 
     // The open reviews come first, then the reviewed & merged rows, so a
@@ -655,7 +655,7 @@ fn paint_reviews(
             y,
         );
     }
-    (y, caret, compact, true)
+    (y, caret, compact, required_width)
 }
 
 /// Paint the dashboard's body onto `s` from row `top`: the watch-only tab strip
@@ -666,7 +666,7 @@ fn paint_reviews(
 /// styles and downsampled by the surface's `Profile` at encode/render time.
 ///
 /// Returns the next free row, the selection caret, whether width hid
-/// information, and whether all mandatory columns fit.
+/// information, and the width required by all mandatory columns.
 #[allow(clippy::too_many_arguments)]
 fn paint_body(
     s: &mut impl TextSurface,
@@ -677,12 +677,12 @@ fn paint_body(
     tabs: bool,
     visible: Visibility,
     top: u16,
-) -> (u16, Option<u16>, bool, bool) {
+) -> (u16, Option<u16>, bool, u16) {
     let mut y = top;
     if tabs {
         y = render::paint_tabs(s, ui.view, ascii, y) + 1;
     }
-    let (y, caret, compact, fits) = match ui.view {
+    let (y, caret, compact, required_width) = match ui.view {
         View::Mine => paint_mine(
             s,
             sections,
@@ -700,7 +700,7 @@ fn paint_body(
     if let Some(row) = caret {
         render::highlight_row(s, row);
     }
-    (y, caret, compact, fits)
+    (y, caret, compact, required_width)
 }
 
 /// Paint the dashboard's bottom block onto `s` from row `top`: the help legend,
@@ -772,9 +772,9 @@ fn paint_dashboard(
     status: &str,
     footer: Option<(&str, bool)>,
     ascii: bool,
-) -> (u16, Option<Position>, bool) {
+) -> (u16, Option<Position>, u16) {
     let visible = Visibility::all(sections);
-    let (y, _, compact, fits) = paint_body(
+    let (y, _, compact, required_width) = paint_body(
         s,
         sections,
         ui,
@@ -796,7 +796,7 @@ fn paint_dashboard(
         compact,
         y,
     );
-    (used, caret, fits)
+    (used, caret, required_width)
 }
 
 /// A safe upper bound on the dashboard body's height, used to size a surface
@@ -854,12 +854,25 @@ fn bottom_bound(ui: &Ui) -> u16 {
     n as u16
 }
 
-fn paint_too_small(screen: &mut Screen<Stdout>, width: Option<u16>) {
+fn too_small_message(required_width: u16, required_height: u16) -> String {
+    format!("Terminal too small — need {required_width}×{required_height}.")
+}
+
+fn paint_too_small(
+    screen: &mut Screen<Stdout>,
+    width: Option<u16>,
+    required_width: u16,
+    required_height: u16,
+) {
     if let Some(width) = width {
         screen.resize((width, 1));
     }
     screen.clear();
-    render::paint_dim(screen, "Terminal too small.", 0);
+    render::paint_dim(
+        screen,
+        &too_small_message(required_width, required_height),
+        0,
+    );
     screen.clear_cursor_position();
 }
 
@@ -892,7 +905,7 @@ fn render_dashboard(
         let (w, rows) = (screen.width().max(1), screen.height().max(1));
         let layout = responsive_layout(w, rows, sections, ui, status, footer, true, true);
         if layout.too_small {
-            paint_too_small(screen, None);
+            paint_too_small(screen, None, render::MIN_WIDTH, layout.required_height);
             screen.render()?;
             return Ok(None);
         }
@@ -900,7 +913,7 @@ fn render_dashboard(
         // Body and bottom are painted into their own buffers because the frame
         // places them independently and pins the bottom to the last rows.
         let mut body = staging_buffer(screen, w, height_bound(sections, ui).max(1));
-        let (body_h, sel, compact, fits) = paint_body(
+        let (body_h, sel, compact, required_width) = paint_body(
             &mut body,
             sections,
             ui,
@@ -910,8 +923,9 @@ fn render_dashboard(
             layout.visible,
             0,
         );
-        if !fits {
-            paint_too_small(screen, None);
+        let required_width = required_width.max(render::MIN_WIDTH);
+        if w < required_width {
+            paint_too_small(screen, None, required_width, layout.required_height);
             screen.render()?;
             return Ok(None);
         }
@@ -939,21 +953,29 @@ fn render_dashboard(
             .map(|p| Position::new(p.x, top + (p.y - cut)))
     } else {
         let w = screen.width().max(1);
+        let required_height = (body_height(
+            sections,
+            ui.view,
+            Visibility::all(sections),
+            footer.is_some(),
+        ) + bottom_height(ui, status, footer, ui.show_help))
+        .min(usize::from(u16::MAX)) as u16;
         if w < render::MIN_WIDTH {
-            paint_too_small(screen, Some(w));
+            paint_too_small(screen, Some(w), render::MIN_WIDTH, required_height);
             None
         } else {
             // Grow tall enough to paint everything, paint, then shrink to the height
             // actually used so the surface is exactly the dashboard's line count.
             screen.resize((w, (height_bound(sections, ui) + bottom_bound(ui)).max(1)));
             screen.clear();
-            let (used, caret, fits) =
+            let (used, caret, required_width) =
                 paint_dashboard(screen, sections, ui, changes, status, footer, ascii);
-            if fits {
+            let required_width = required_width.max(render::MIN_WIDTH);
+            if w >= required_width {
                 screen.resize((w, used.max(1)));
                 caret
             } else {
-                paint_too_small(screen, Some(w));
+                paint_too_small(screen, Some(w), required_width, required_height);
                 None
             }
         }
@@ -984,12 +1006,14 @@ pub fn render_to_string(
     let w = render::OUTPUT_WIDTH as u16;
     let mut canvas = TextBuffer::new(w, height_bound(sections, ui) + bottom_bound(ui));
     // One-shot output never searches, so there is no caret to place.
-    let (used, _, fits) = paint_dashboard(&mut canvas, sections, ui, changes, "", footer, ascii);
-    if fits {
+    let (used, _, required_width) =
+        paint_dashboard(&mut canvas, sections, ui, changes, "", footer, ascii);
+    let required_width = required_width.max(render::MIN_WIDTH);
+    if w >= required_width {
         canvas.resize(w, used.max(1));
     } else {
         canvas = TextBuffer::new(w, 1);
-        render::paint_dim(&mut canvas, "Terminal too small.", 0);
+        render::paint_dim(&mut canvas, &too_small_message(required_width, used), 0);
     }
 
     let mut out = Vec::new();
@@ -2146,7 +2170,7 @@ mod tests {
     /// Paint a dashboard onto an offscreen buffer and read it back as plain text.
     fn body(sections: &Sections, ui: &Ui) -> String {
         let mut canvas = TextBuffer::new(render::OUTPUT_WIDTH as u16, 64);
-        let (used, _, fits) = paint_dashboard(
+        let (used, _, required_width) = paint_dashboard(
             &mut canvas,
             sections,
             ui,
@@ -2155,7 +2179,7 @@ mod tests {
             None,
             true,
         );
-        assert!(fits);
+        assert!(required_width <= render::OUTPUT_WIDTH as u16);
         canvas.resize(render::OUTPUT_WIDTH as u16, used.max(1));
         canvas.display_with(Profile::Disabled).to_string()
     }
@@ -2344,6 +2368,7 @@ mod tests {
         );
         assert!(layout.too_small);
         assert_eq!(layout.visible, Visibility::none());
+        assert_eq!(layout.required_height, 6);
     }
 
     #[test]
@@ -2417,6 +2442,11 @@ mod tests {
             true,
         );
         assert!(layout.too_small);
+        assert_eq!(layout.required_height, 3);
+        assert_eq!(
+            too_small_message(render::MIN_WIDTH, layout.required_height),
+            "Terminal too small — need 24×3."
+        );
     }
 
     #[test]
@@ -2444,7 +2474,7 @@ mod tests {
         let highlighted = |ui: &Ui| -> Vec<String> {
             let w = render::OUTPUT_WIDTH as u16;
             let mut canvas = TextBuffer::new(w, 64);
-            let (_, _, fits) = paint_dashboard(
+            let (_, _, required_width) = paint_dashboard(
                 &mut canvas,
                 &sections,
                 ui,
@@ -2453,7 +2483,7 @@ mod tests {
                 None,
                 true,
             );
-            assert!(fits);
+            assert!(required_width <= w);
             let text: Vec<String> = canvas
                 .display_with(Profile::Disabled)
                 .to_string()

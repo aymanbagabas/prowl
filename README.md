@@ -81,7 +81,7 @@ then lower-priority sections. In the PR view it hides shipments, the merge
 queue, and merged PRs in that order; in the reviews view it hides
 reviewed-and-merged PRs. The open PR section is always kept whole. If that
 section or the minimum useful columns do not fit, prowl shows
-`Terminal too small.` The legend is contextual to the active view:
+`Terminal too small` with the minimum required dimensions. The legend is contextual to the active view:
 mergeability glyphs for your PRs, review glyphs for your reviews.
 
 Move the selection cursor through the listed PRs and releases with `j`/`k` (or

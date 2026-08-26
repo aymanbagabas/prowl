@@ -109,7 +109,7 @@ watch event loop); everything else is testable modules:
   `TableAlignment` shares the two-column gutter and PR widths across all
   tables in a view; when branches are shown it also shares TITLE width, so PR,
   TITLE, and BRANCH all start on the same columns. Below 24 columns the
-  dashboard reports `Terminal too small.` Piped output and screenshots use
+  dashboard reports `Terminal too small — need W×H.` Piped output and screenshots use
   `OUTPUT_WIDTH` = 120 because they have no live screen dimensions. Headers (with an optional dim
   count badge and trailing note — the queue ETA), the `tabs` view-switcher strip,
   the leading-column `change_marker` and the selected-row highlight
@@ -137,7 +137,8 @@ watch event loop); everything else is testable modules:
   then Mine sections in Shipments → Queue → Merged order (or Reviewed & merged
   in the Reviews view), while protecting the open-PR section. Navigation,
   search counts, open, and copy use the same `Visibility`. If the protected
-  section does not fit whole, the frame is replaced by `Terminal too small.`
+  section does not fit whole, the frame is replaced by
+  `Terminal too small — need W×H.`
   The body is drawn through
   a `uncurses::buffer::View`, which clips without translating, so blitting it maps
   the first visible body row onto the top of the screen.
@@ -368,7 +369,7 @@ still performs all teardown through `finish`.
   footer — is **pinned** to the last rows of the screen (`render::compose`).
   Height pressure hides help, then Shipments, Queue, and Merged in the Mine
   view, or Reviewed & merged in the Reviews view. Open PRs remain whole; if they
-  cannot fit, the frame says `Terminal too small.` The only persistent
+  cannot fit, the frame says `Terminal too small — need W×H.` The only persistent
   bottom line is the footer
   (`r refresh (every 5m) - tab switch view - enter open - y copy - / search - ?
   help`), which carries the refresh interval; a failed refresh adds a dim

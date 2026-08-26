@@ -319,6 +319,24 @@ pub fn table_fits_aligned(s: &impl TextSurface, table: &Table, alignment: &Table
     table_layout(s, table, Some(alignment)).is_some()
 }
 
+pub fn table_required_width(
+    s: &impl TextSurface,
+    table: &Table,
+    alignment: &TableAlignment,
+) -> u16 {
+    let Some(title) = table.column("TITLE") else {
+        let width = (0..table.header.len())
+            .map(|column| col_width(s, table, column))
+            .sum::<usize>()
+            + SEP * table.header.len().saturating_sub(1);
+        return width.min(usize::from(u16::MAX)) as u16;
+    };
+    let prefix = (0..title)
+        .map(|column| aligned_col_width(s, table, column, title, Some(alignment)))
+        .sum::<usize>();
+    (prefix + SEP * title + TITLE_MIN).min(usize::from(u16::MAX)) as u16
+}
+
 /// Whether a wider surface would reveal a hidden column or more text in TITLE
 /// or BRANCH.
 pub fn table_is_compact(s: &impl TextSurface, table: &Table) -> bool {
@@ -1064,6 +1082,8 @@ mod tests {
         };
         let canvas = TextBuffer::new(MIN_WIDTH, 2);
         assert!(!table_fits(&canvas, &table));
+        let alignment = table_alignment(&canvas, &[&table]);
+        assert!(table_required_width(&canvas, &table, &alignment) > MIN_WIDTH);
     }
 
     #[test]
