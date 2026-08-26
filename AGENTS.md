@@ -363,7 +363,8 @@ opens the selected row, `y`/`Y` copy links, the movement keys drive the cursor,
   navigation, search, `Tab`, `?`, resize and suspend stay live mid-refresh and
   **quit is instant** (a quit abandons the in-flight request, which is reaped at
   process exit). The terminal is restored on every exit path by `App::stop`
-  (`Program::finish`), which the caller always runs after `App::run`.
+  (`Program::finish`), which the caller always runs after `App::run`. Pinned
+  staging buffers inherit the live screen's grapheme and East Asian width policy.
 - **Interactive `--once`:** `run_once_interactive` brings up an *inline* `Program`
   (raw mode, hidden cursor) and paints a `Loading...` frame while the fetch runs on
   a background thread, so keystrokes don't echo and `q`/`Esc`/`Ctrl-C` aborts the

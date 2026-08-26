@@ -558,6 +558,12 @@ fn paint_loading(screen: &mut Screen<Stdout>) -> Result<()> {
     Ok(())
 }
 
+fn staging_buffer(surface: &impl TextSurface, width: u16, height: u16) -> TextBuffer {
+    TextBuffer::new(width, height)
+        .with_width_mode(surface.width_mode())
+        .with_eaw_wide(surface.eaw_wide())
+}
+
 /// A safe upper bound on the bottom block's height (search prompt, error line,
 /// footer, help legend, and the blank row between each).
 fn bottom_bound(ui: &Ui) -> u16 {
@@ -599,9 +605,9 @@ fn render_dashboard(
         // Body and bottom are painted into their own buffers because the frame
         // places them independently: the body may be scrolled, the bottom is
         // pinned to the last rows.
-        let mut body = TextBuffer::new(w, height_bound(sections, ui).max(1));
+        let mut body = staging_buffer(screen, w, height_bound(sections, ui).max(1));
         let (body_h, sel) = paint_body(&mut body, sections, ui, changes, ascii, true, 0);
-        let mut bottom = TextBuffer::new(w, bottom_bound(ui).max(1));
+        let mut bottom = staging_buffer(screen, w, bottom_bound(ui).max(1));
         let (bottom_h, at) = paint_bottom(&mut bottom, sections, ui, status, footer, ascii, 0);
 
         screen.clear();
@@ -1723,6 +1729,19 @@ mod tests {
         );
         canvas.resize(render::MAX_WIDTH as u16, used.max(1));
         canvas.display_with(Profile::Disabled).to_string()
+    }
+
+    #[test]
+    fn staging_buffers_inherit_the_terminal_width_policy() {
+        use uncurses::text::WidthMode;
+
+        let screen = TextBuffer::new(1, 1)
+            .with_width_mode(WidthMode::Grapheme)
+            .with_eaw_wide(true);
+        let staged = staging_buffer(&screen, 10, 2);
+
+        assert_eq!(staged.width_mode(), WidthMode::Grapheme);
+        assert!(staged.eaw_wide());
     }
 
     /// A `Ui` for the given view with nothing selected and no filter.
