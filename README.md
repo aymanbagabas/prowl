@@ -76,7 +76,8 @@ screen, so quitting hands your shell back exactly as you left it. A footer glued
 to the bottom of the screen (`r refresh (every 5m) - tab switch view - enter open
 - y copy - / search - ? help`) shows the keys and the refresh interval. While a
 refresh is in flight the hint reads `r refreshing` and `r` presses are ignored
-until it finishes. When height is limited, prowl first hides the help legend,
+until it finishes. On narrow screens the footer removes low-priority labels and
+hints instead of clipping. When height is limited, prowl first hides the help legend,
 then lower-priority sections. In the PR view it hides shipments, the merge
 queue, and merged PRs in that order; in the reviews view it hides
 reviewed-and-merged PRs. The open PR section is always kept whole. If that

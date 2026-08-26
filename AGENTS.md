@@ -372,7 +372,8 @@ still performs all teardown through `finish`.
   cannot fit, the frame says `Terminal too small — need W×H.` The only persistent
   bottom line is the footer
   (`r refresh (every 5m) - tab switch view - enter open - y copy - / search - ?
-  help`), which carries the refresh interval; a failed refresh adds a dim
+  help`), which carries the refresh interval and progressively removes
+  low-priority labels/hints to fit narrow widths instead of clipping; a failed refresh adds a dim
   `error: …` line above it (the same slot a copy's `copied N links`
   confirmation uses). While a fetch is in flight the footer reads `r refreshing` with the
   `r` glyph dimmed. Every fetch (and the one-time `me`/default-branch resolution)

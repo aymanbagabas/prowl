@@ -535,20 +535,67 @@ pub fn paint_footer(
         format!("refresh (every {interval})")
     };
     let mut hints = vec![
-        ("r", refresh.as_str()),
-        ("tab", "switch view"),
-        ("enter", "open"),
-        ("y", "copy"),
-        ("/", "search"),
-        ("?", "help"),
+        ("r", refresh),
+        ("tab", "switch view".to_string()),
+        ("enter", "open".to_string()),
+        ("y", "copy".to_string()),
+        ("/", "search".to_string()),
+        ("?", "help".to_string()),
     ];
     if more {
-        hints.insert(0, ("+", "resize for more"));
+        hints.insert(0, ("+", "resize for more".to_string()));
     }
+
+    let available = usize::from(s.bounds().width);
+    let width = |hints: &[(&str, String)]| {
+        hints
+            .iter()
+            .map(|(key, label)| {
+                s.str_width(key) as usize
+                    + usize::from(!label.is_empty())
+                    + s.str_width(label) as usize
+            })
+            .sum::<usize>()
+            + 3 * hints.len().saturating_sub(1)
+    };
+    let essential = 1 + usize::from(more);
+    if width(&hints) > available {
+        for index in (essential..hints.len()).rev() {
+            hints[index].1.clear();
+            if width(&hints) <= available {
+                break;
+            }
+        }
+    }
+    while width(&hints) > available && hints.len() > essential {
+        hints.pop();
+    }
+    if width(&hints) > available {
+        if more {
+            hints[0].1 = "more".to_string();
+        }
+        if !refreshing {
+            hints[usize::from(more)].1 = "refresh".to_string();
+        }
+    }
+    if width(&hints) > available && more {
+        hints[0].1.clear();
+    }
+    if width(&hints) > available && !refreshing {
+        hints[usize::from(more)].1.clear();
+    }
+
+    let text = |key: &str, label: &str| {
+        if label.is_empty() {
+            key.to_string()
+        } else {
+            format!("{key} {label}")
+        }
+    };
     if ascii {
         let line = hints
             .iter()
-            .map(|(k, l)| format!("{k} {l}"))
+            .map(|(key, label)| text(key, label))
             .collect::<Vec<_>>()
             .join(" - ");
         s.set_str((0, y), &line, None);
@@ -557,14 +604,22 @@ pub fn paint_footer(
     let key = status::fg(status::OVERLAY).bold();
     let dim = Style::new().faint();
     let mut x = 0u16;
-    for (i, (k, label)) in hints.iter().enumerate() {
+    for (i, (key_glyph, label)) in hints.iter().enumerate() {
         if i > 0 {
             x = s.set_str((x, y), " - ", &dim).x;
         }
         // `r` is inert while a fetch is in flight, so its glyph fades to dim.
-        let kstyle = if *k == "r" && refreshing { &dim } else { &key };
-        let p = s.set_str((x, y), k, kstyle);
-        x = s.set_str((p.x + 1, y), label, &dim).x;
+        let key_style = if *key_glyph == "r" && refreshing {
+            &dim
+        } else {
+            &key
+        };
+        let p = s.set_str((x, y), key_glyph, key_style);
+        x = if label.is_empty() {
+            p.x
+        } else {
+            s.set_str((p.x + 1, y), label, &dim).x
+        };
     }
     y + 1
 }
@@ -980,6 +1035,20 @@ mod tests {
             paint_footer(b, "5m", false, true, true, 0);
         });
         assert!(compact.starts_with("+ resize for more - r refresh"));
+
+        for width in MIN_WIDTH..80 {
+            let plain = encode(width, 1, Profile::Disabled, |b| {
+                paint_footer(b, "5m", false, false, true, 0);
+            });
+            assert!(plain.chars().count() <= usize::from(width));
+            assert!(plain.starts_with('r'));
+
+            let constrained = encode(width, 1, Profile::Disabled, |b| {
+                paint_footer(b, "5m", false, true, true, 0);
+            });
+            assert!(constrained.chars().count() <= usize::from(width));
+            assert!(constrained.starts_with('+'));
+        }
 
         let compact_refreshing = encode(80, 1, Profile::TrueColor, |b| {
             paint_footer(b, "5m", true, true, false, 0);
