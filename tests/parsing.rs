@@ -88,15 +88,26 @@ fn queue_next_eta_parses_and_defaults_to_none() {
 
 #[test]
 fn queue_styled_render_uses_palette_and_links() {
+    use uncurses::buffer::TextBuffer;
+    use uncurses::color::Profile;
+    use uncurses::text::Encode;
+
     let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
     let rows = queue::build_rows(model_queue_nodes(data), "caarlos0");
-    let out = render::render_table(&queue::to_table(&rows, false), true);
+    let table = queue::to_table(&rows, false);
+
+    let mut canvas = TextBuffer::new(render::MAX_WIDTH as u16, 8);
+    render::paint_table(&mut canvas, &table, 40, false, 0);
+    let mut buf = Vec::new();
+    canvas.encode_with(&mut buf, Profile::TrueColor).unwrap();
+    let out = String::from_utf8(buf).unwrap();
 
     // Mine row is highlighted yellow (#f9e2af); others' PR cell is blue (#89b4fa).
     assert!(out.contains("38;2;249;226;175"), "expected mine yellow");
     assert!(out.contains("38;2;137;180;250"), "expected not-mine blue");
-    // URLs are OSC-8 hyperlinks.
-    assert!(out.contains("\x1b]8;;https://github.com/octo/repo/pull/101\x1b\\"));
+    // URLs are OSC-8 hyperlinks carrying a per-URL `id=` param.
+    assert!(out.contains("\x1b]8;id="));
+    assert!(out.contains(";https://github.com/octo/repo/pull/101\x1b\\"));
     // Wait/build columns are present; the entry whose checks are all still
     // queued (no `startedAt`) shows a dash.
     assert!(out.contains("WAIT"));
@@ -304,9 +315,11 @@ fn reviews_open_render_uses_palette_and_links() {
     let data: ReviewsData = parse(include_str!("fixtures/reviews.json"));
     let rows = reviews::build_open_rows(data);
     let out = render::render_table(&reviews::open_to_table(&rows, false), true);
-    // The Awaiting glyph is yellow (#f9e2af); PR numbers are OSC-8 hyperlinks.
+    // The Awaiting glyph is yellow (#f9e2af); PR numbers are OSC-8 hyperlinks
+    // carrying a per-URL `id=` param.
     assert!(out.contains("38;2;249;226;175"), "expected awaiting yellow");
-    assert!(out.contains("\x1b]8;;https://github.com/octo/repo/pull/101\x1b\\"));
+    assert!(out.contains("\x1b]8;id="));
+    assert!(out.contains(";https://github.com/octo/repo/pull/101\x1b\\"));
 }
 
 #[test]

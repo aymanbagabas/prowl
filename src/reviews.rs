@@ -6,8 +6,8 @@ use crate::model::{MergedNode, ReviewPrNode, ReviewsData};
 use crate::render::{self, Cell, Table};
 use crate::status::{self, BLUE, ReviewState};
 use crate::timefmt;
-use anstyle::Style;
 use std::collections::{HashMap, HashSet};
+use uncurses::style::Style;
 
 /// Author logins are truncated to this many display columns (matches the queue).
 const AUTHOR_WIDTH: usize = 16;
@@ -113,7 +113,7 @@ pub fn without_drafts(mut rows: Vec<ReviewRow>) -> Vec<ReviewRow> {
 }
 
 pub fn open_to_table(rows: &[ReviewRow], ascii: bool) -> Table {
-    let dim = Style::new().dimmed();
+    let dim = Style::new().faint();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let glyph = status::review_glyph(r.state, ascii);
@@ -122,9 +122,9 @@ pub fn open_to_table(rows: &[ReviewRow], ascii: bool) -> Table {
             status::fg(status::review_style(r.state).1),
         );
         let pr = if r.is_draft {
-            Cell::link_styled(format!("#{}", r.number), r.url.clone(), dim)
+            Cell::pr(r.number, r.url.clone(), &dim)
         } else {
-            Cell::link_styled(format!("#{}", r.number), r.url.clone(), status::fg(BLUE))
+            Cell::pr(r.number, r.url.clone(), status::fg(BLUE))
         };
         out.push(vec![
             // A leading (always-blank) margin column keeps the two reviews
@@ -133,8 +133,8 @@ pub fn open_to_table(rows: &[ReviewRow], ascii: bool) -> Table {
             st,
             pr,
             Cell::plain(r.title.clone()),
-            Cell::styled(render::truncate(&r.author, AUTHOR_WIDTH, ascii), dim),
-            Cell::styled(timefmt::age_of(r.updated_at.as_deref()), dim),
+            Cell::styled(render::truncate(&r.author, AUTHOR_WIDTH, ascii), &dim),
+            Cell::styled(timefmt::age_of(r.updated_at.as_deref()), &dim),
         ]);
     }
     Table {
@@ -175,7 +175,7 @@ pub fn build_merged_rows(nodes: Vec<MergedNode>, limit: usize) -> Vec<ReviewedMe
 }
 
 pub fn merged_to_table(rows: &[ReviewedMergedRow], ascii: bool) -> Table {
-    let dim = Style::new().dimmed();
+    let dim = Style::new().faint();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         out.push(vec![
@@ -184,10 +184,10 @@ pub fn merged_to_table(rows: &[ReviewedMergedRow], ascii: bool) -> Table {
             // a per-row glyph would say nothing.
             Cell::plain(" "),
             Cell::plain(" "),
-            Cell::link_styled(format!("#{}", r.number), r.url.clone(), status::fg(BLUE)),
+            Cell::pr(r.number, r.url.clone(), status::fg(BLUE)),
             Cell::plain(r.title.clone()),
-            Cell::styled(render::truncate(&r.author, AUTHOR_WIDTH, ascii), dim),
-            Cell::styled(timefmt::age_of(r.merged_at.as_deref()), dim),
+            Cell::styled(render::truncate(&r.author, AUTHOR_WIDTH, ascii), &dim),
+            Cell::styled(timefmt::age_of(r.merged_at.as_deref()), &dim),
         ]);
     }
     Table {

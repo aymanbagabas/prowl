@@ -4,7 +4,7 @@ use crate::model::QueueEntryNode;
 use crate::render::{self, Cell, Table};
 use crate::status::{self, BLUE, Checks, Lamp, YELLOW};
 use crate::timefmt;
-use anstyle::Style;
+use uncurses::style::Style;
 
 /// Queue author logins are truncated to this many display columns.
 const AUTHOR_WIDTH: usize = 16;
@@ -59,10 +59,10 @@ pub fn to_table(rows: &[QueueRow], ascii: bool) -> Table {
     for r in rows {
         let (meta, pr, author_style, title) = if r.mine {
             let hi = status::fg(YELLOW).bold();
-            (hi, hi, hi, Style::new().bold())
+            (hi.clone(), hi.clone(), hi, Style::new().bold())
         } else {
             (
-                Style::new().dimmed(),
+                Style::new().faint(),
                 status::fg(BLUE),
                 Style::new(),
                 Style::new(),
@@ -77,12 +77,12 @@ pub fn to_table(rows: &[QueueRow], ascii: bool) -> Table {
         };
         out.push(vec![
             Cell::plain(" "),
-            Cell::styled(r.position.to_string(), meta),
-            Cell::link_styled(format!("#{}", r.number), r.url.clone(), pr),
-            Cell::styled(r.title.clone(), title),
-            Cell::styled(author, author_style),
-            Cell::styled(wait, meta),
-            Cell::styled(build, meta),
+            Cell::styled(r.position.to_string(), &meta),
+            Cell::pr(r.number, r.url.clone(), &pr),
+            Cell::styled(r.title.clone(), &title),
+            Cell::styled(author, &author_style),
+            Cell::styled(wait, &meta),
+            Cell::styled(build, &meta),
             render::lamp_cell(r.checks.fail, Lamp::Fail),
             render::lamp_cell(r.checks.running, Lamp::Running),
             render::lamp_cell(r.checks.pass, Lamp::Pass),

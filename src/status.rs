@@ -2,21 +2,20 @@
 //! the dashboard draws: PR mergeability, the check-run semaphore, and review
 //! state. Catppuccin Mocha colors, Nerd Font glyphs, 24-bit truecolor.
 
-use anstyle::{RgbColor, Style};
-
-pub type Rgb = (u8, u8, u8);
+use uncurses::color::Color;
+use uncurses::style::Style;
 
 // Catppuccin Mocha palette (the subset the dashboard uses).
-pub const GREEN: Rgb = (166, 227, 161); // #a6e3a1
-pub const RED: Rgb = (243, 139, 168); // #f38ba8
-pub const YELLOW: Rgb = (249, 226, 175); // #f9e2af
-pub const MAUVE: Rgb = (203, 166, 247); // #cba6f7
-pub const PEACH: Rgb = (250, 179, 135); // #fab387
-pub const BLUE: Rgb = (137, 180, 250); // #89b4fa
-pub const LAVENDER: Rgb = (180, 190, 254); // #b4befe
-pub const PINK: Rgb = (245, 194, 231); // #f5c2e7 — "changed since last refresh" marker
-pub const OVERLAY: Rgb = (147, 153, 178); // #9399b2 — muted accent (help legend)
-pub const SURFACE: Rgb = (69, 71, 90); // #45475a — selected-row background
+pub const GREEN: Color = Color::rgb(166, 227, 161); // #a6e3a1
+pub const RED: Color = Color::rgb(243, 139, 168); // #f38ba8
+pub const YELLOW: Color = Color::rgb(249, 226, 175); // #f9e2af
+pub const MAUVE: Color = Color::rgb(203, 166, 247); // #cba6f7
+pub const PEACH: Color = Color::rgb(250, 179, 135); // #fab387
+pub const BLUE: Color = Color::rgb(137, 180, 250); // #89b4fa
+pub const LAVENDER: Color = Color::rgb(180, 190, 254); // #b4befe
+pub const PINK: Color = Color::rgb(245, 194, 231); // #f5c2e7 — "changed since last refresh" marker
+pub const OVERLAY: Color = Color::rgb(147, 153, 178); // #9399b2 — muted accent (help legend)
+pub const SURFACE: Color = Color::rgb(69, 71, 90); // #45475a — selected-row background
 
 /// Coarse CI/merge state of an open PR. It is no longer rendered directly (the
 /// row shows a mergeability glyph plus a check-run semaphore); it exists as the
@@ -70,7 +69,7 @@ pub fn mergeable_of(merge_state: Option<&str>, mergeable: Option<&str>) -> Merge
 }
 
 /// Glyph + truecolor for a mergeability state.
-pub fn mergeable_style(m: Mergeable) -> (char, Rgb) {
+pub fn mergeable_style(m: Mergeable) -> (char, Color) {
     match m {
         Mergeable::Ready => ('\u{f00c}', GREEN),     // check
         Mergeable::Blocked => ('\u{f05e}', YELLOW),  // ban
@@ -132,7 +131,7 @@ pub const REVIEW_ORDER: [ReviewState; 4] = [
 ];
 
 /// Glyph + truecolor for a review state — the Reviews view's per-row indicator.
-pub fn review_style(s: ReviewState) -> (char, Rgb) {
+pub fn review_style(s: ReviewState) -> (char, Color) {
     match s {
         ReviewState::Awaiting => ('\u{F06E}', YELLOW), // eye: needs your review
         ReviewState::ReReview => ('\u{F021}', PEACH),  // rotate: look again
@@ -170,14 +169,9 @@ pub fn review_meaning(s: ReviewState) -> &'static str {
     }
 }
 
-/// A truecolor foreground style.
-pub fn fg(rgb: Rgb) -> Style {
-    Style::new().fg_color(Some(RgbColor(rgb.0, rgb.1, rgb.2).into()))
-}
-
-/// A truecolor background style.
-pub fn bg(rgb: Rgb) -> Style {
-    Style::new().bg_color(Some(RgbColor(rgb.0, rgb.1, rgb.2).into()))
+/// A foreground style for a palette color.
+pub fn fg(color: Color) -> Style {
+    Style::new().fg(color)
 }
 
 /// The three lamps of the per-PR check semaphore.
@@ -189,7 +183,7 @@ pub enum Lamp {
 }
 
 /// Truecolor for a lamp — red / yellow / green, straight from the palette.
-pub fn lamp_color(l: Lamp) -> Rgb {
+pub fn lamp_color(l: Lamp) -> Color {
     match l {
         Lamp::Fail => RED,
         Lamp::Running => YELLOW,

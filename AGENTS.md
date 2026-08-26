@@ -18,15 +18,19 @@ output with `--view`):
 Below the active view is an optional help legend, an optional search prompt, and
 last a `r refresh (every 5m) - tab switch view - enter open -
 y copy - / search - ? help` footer (which also shows the refresh interval, and
-reads `r refreshing` while a fetch is in flight)
-at the bottom. While watching, the very top shows a `my PRs / reviews` tab strip
-with the active view accented. It rings the terminal bell when one of your PRs
-merges or an open PR's status changes, and flags the changed rows (the bell and
-change markers track the Mine view only). While watching it takes over the
-alternate screen and pins that bottom block to the last rows, but it is still a
-plain `std::thread::sleep` redraw loop — **not** a raw-mode TUI — and every
-escape is gated on the `styled` flag, so piped output stays plain and
-pipe-friendly and URLs can be OSC-8 hyperlinks.
+reads `r refreshing` while a fetch is in flight). While watching, the very top
+shows a `my PRs / reviews` tab strip with the active view accented. It rings the
+terminal bell when one of your PRs merges or an open PR's status changes, and
+flags the changed rows (the bell and change markers track the Mine view only).
+The interactive watch runs on the
+[**uncurses**](https://github.com/aymanbagabas/uncurses) toolkit with an event
+loop: it shows an *inline* `Loading...` frame, then enters the **alternate
+screen** once the first fetch lands (or immediately when there's a
+cache to paint), where that bottom block is **pinned** to the last rows and the
+sections scroll under it. Interactive `--once` uses an *inline* surface instead:
+a `Loading...` frame while the fetch runs (abortable with `q`), then the dashboard
+is left in the terminal. Piped/non-TTY output is plain text printed straight to
+stdout, so the dashboard stays pipe-friendly and URLs can be OSC-8 hyperlinks.
 
 ## Golden rules
 
@@ -37,23 +41,31 @@ pipe-friendly and URLs can be OSC-8 hyperlinks.
   GraphQL `errors`). REST is `GET /<path>`.
 - **Auth** lives in `auth.rs`: token resolution is `PROWL_TOKEN` → `GITHUB_TOKEN`
   → OS keyring / chmod-600 file → OAuth **device flow** (interactive). The OAuth
-  App client id is public and embedded. `--login` forces the device flow.
-- **Don't add a TUI framework** (ratatui, etc.): it cannot emit OSC-8 hyperlinks
-  and does not degrade to plain text when piped. Both are required.
-- **Styling:** `anstyle` for SGR incl. 24-bit truecolor; OSC-8 links, the bell,
-  and the screen control (clear, alternate screen, autowrap, cursor, the pinned
-  frame's per-line erase) are emitted by hand. All of it is gated on a `styled`
-  flag, so output is plain when piped, on a non-TTY, or with `--once`, and styled
-  only on an interactive TTY watch. A false `styled` flag drops the SGR colors,
-  OSC-8 hyperlinks, glyphs, the clear and the bottom-pinning, leaving plain
-  ASCII.
+  App client id is public and embedded. `--login` forces the device flow. The
+  device prompt is written to stderr, so its link is styled from stderr's own
+  TTY/profile detection and stays plain when stderr is redirected.
+- **The terminal toolkit is `uncurses`** (the author's own low-level library):
+  its `style::Style` carries SGR + the OSC-8 link, `Program` owns raw mode / the
+  alternate screen / input / teardown while `Screen` is the renderer it draws
+  through (`program.screen_mut()`), and `text` provides width math.
+  Don't reach for a higher-level TUI framework (ratatui, etc.): the watch is a
+  full-repaint dashboard, and one-shot output must degrade to plain piped text.
+- **Styling:** built on `uncurses::style::Style` (SGR incl. 24-bit truecolor;
+  OSC-8 links ride in the style). There is **one painter**: the dashboard is
+  drawn straight onto an `uncurses` surface with `set_str`. Plain-vs-styled is
+  not a code branch — the surface's color `Profile` downsamples at encode/render
+  time, and `Profile::Disabled` (non-TTY/piped) drops SGR and hyperlinks, so
+  piped output is plain automatically. Glyph-vs-letter and bar-vs-parens are the
+  one content choice, driven by an `ascii` flag (`--ascii`, or a `Disabled`
+  profile).
 - **One status palette.** Colors and glyphs live only in `status.rs` (Catppuccin
-  Mocha + Nerd Font). Don't redefine them elsewhere.
+  Mocha + Nerd Font), as `uncurses::color::Color` constants. Don't redefine them.
 
 ## Layout (lib + thin bin)
 
-`src/main.rs` is a thin binary calling `prowl::run()`. `src/lib.rs` orchestrates;
-everything else is testable modules:
+`src/main.rs` is a thin binary calling `prowl::run()`. `src/lib.rs` orchestrates
+(painting the dashboard onto a surface, encoding the one-shot frame, and the
+watch event loop); everything else is testable modules:
 
 - `cli.rs` — clap derive CLI, `Section` enum, `View` (Mine/Reviews, `--view`,
   `.toggle()`), `ReviewScope` (Direct/All, `--review-scope`, `.qualifier()`),
@@ -76,38 +88,50 @@ everything else is testable modules:
   now only the bell's coarse change key (nothing renders it); and the
   Reviews-view `ReviewState` (Awaiting/ReReview/Updated/Reviewed) with
   `review_style`/`review_glyph`/`review_ascii`/`review_meaning` and
-  `REVIEW_ORDER`.
-- `render.rs` — `Cell`/`Table`, width-aware padding (`unicode-width`), OSC-8
-  (incl. `link_styled` for clickable PR numbers), `truncate` + `fit_titles`
-  (cap/align the shared `TITLE` column so every table lines up and the whole
-  view stays within `MAX_WIDTH` = 120 columns), headers (`header`, with an
-  optional dim count badge and trailing note — the queue ETA), the `tabs`
-  view-switcher strip, the leading-column change marker (`change_marker`) and
-  the selected-row highlight (`select_row` marks a row's leading cell with the
-  selection background; `highlight_selected` then extends that background across
-  the whole rendered line, padded to the body's width — so the change marker
-  stays visible under it), the
-  key-hint footer (`footer`, carrying the refresh
-  interval and `enter open` / `/ search` hints), the `search_prompt` line (the
-  `/` query with a block cursor + match count), help
-  legend (`help(view, …)` — a movement-keys line then, contextual: the
+  `REVIEW_ORDER`. Colors are `uncurses::color::Color` constants and `fg(Color)`
+  builds the foreground `Style`.
+- `status.rs` — **the** palette: `Status`, `status_style` (returns a glyph +
+  `Color`), glyphs/ASCII, `derive_status` (precedence), `fail_count`; the
+  `mergeStateStatus` helpers `state_style`, `state_label` (DIRTY → CONFLICTS),
+  `state_glyph`, `state_meaning`; and the Reviews-view `ReviewState` (Awaiting/
+  ReReview/Updated/Reviewed) with `review_style`/`review_glyph`/`review_ascii`/
+  `review_meaning` and `REVIEW_ORDER`. `fg(Color)` builds the foreground `Style`.
+- `render.rs` — the surface painters: `paint_table`/`paint_header`/`paint_dim`/
+  `paint_footer`/`paint_tabs`/`paint_search_prompt`/`paint_help` write onto any
+  `&mut impl TextSurface` using the surface's own `str_width` (no in-house width
+  math) and `set_str` (column gaps are implicit — unpainted cells stay blank, so
+  no padding is emitted). `Cell` (text + `Style`, the OSC-8 link folded into the
+  style) / `Table`, `truncate` (uncurses' width-aware truncator), and
+  `title_width` (cap/align the shared `TITLE` column so every table lines up and
+  the whole view stays within `MAX_WIDTH` = 120). Headers (with an optional dim
+  count badge and trailing note — the queue ETA), the `tabs` view-switcher strip,
+  the leading-column `change_marker` and the selected-row highlight
+  (`highlight_row` paints the selection background edge to edge across one
+  screen row, once the body is painted — so it covers the
+  hand-laid-out shipments section too, and the change marker stays visible
+  underneath instead of being overwritten by a caret), the key-hint footer
+  (carrying the
+  refresh interval and the `enter open` / `/ search` hints), the search prompt
+  line (the `/` query + match count; it paints no cursor and instead *returns*
+  the caret cell, so the watch can park the terminal's real one there), and the
+  help legend
+  (`paint_help(view, …)` — a movement-keys line then, contextual: the
   mergeability glyphs for Mine, review glyphs for Reviews; the column headers
   speak for themselves and are not repeated; first in the bottom block, above the
-  search prompt and footer),
-  loading screen, bell, clear, and the dim one-liners: `empty_line` (the error
-  line, the loading screen) and `placeholder` (an empty section's stand-in row,
-  indented — `ROW_INDENT` — so it lines up with the rows it replaces). It also
-  owns the watch-mode screen: the
-  `ENTER_SCREEN` / `LEAVE_SCREEN` sequences (alternate screen + autowrap off +
-  cursor hidden, and their exact reverse), and `frame(body, bottom, rows,
-  caret)`, which composes one screen of exactly `rows` lines — as much of the
-  body as fits, blank padding, then the bottom block glued to the last rows.
-  When the body is taller than what's left it scrolls to keep `caret`
-  (`caret_line`, which locates the selected row by its unique background)
+  search prompt and footer) live here too, plus `render_table`
+  (paint one table to a string, for tests) and `paint_dim`/`paint_dim_at`, the
+  dim one-liners — the trailing status line flush left, an empty section's
+  placeholder indented by `ROW_INDENT` so it lines up with the rows it stands in
+  for.
+  It also owns the watch frame's geometry: `compose(screen, body, bottom, rows,
+  caret)` fills exactly `rows` rows — as much of the body as fits at the top,
+  blank padding, then the bottom block glued to the last rows — and returns the
+  row that block starts on. When the body is taller than the space left over it
+  scrolls, keeping `caret` (the row a view reported the selection landed on)
   centered; when the bottom block alone overflows it is cut from the start, so
-  the footer survives and the help legend is what goes. Each line erases its own
-  tail and the last has no trailing newline, so painting a frame at `HOME` never
-  scrolls the screen — no clear, no flicker.
+  the footer survives and the help legend is what goes. The body is drawn through
+  a `uncurses::buffer::View`, which clips without translating, so blitting it maps
+  the first visible body row onto the top of the screen.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
   Each row's PR number is the OSC-8 link (no separate URL column). The open-PRs
   columns are `[mark] [M] PR TITLE [BRANCH] FAIL RUN PASS THREADS`: `M` is the
@@ -158,9 +182,10 @@ everything else is testable modules:
   empty section holds no index, so index 0 means the first non-empty one),
   `filter(&Sections, query)` clones the matching rows for rendering
   (same per-row haystack — number/title/author/tag — so rows and targets stay in
-  lockstep), `moved` advances the selection cursor (lazy: `None` until first
-  move, `Bottom` enters at the last row), and `clamp` keeps it in range after a
-  refresh.
+  lockstep), `moved` advances the selection cursor by a `nav::Move` (the
+  input-agnostic movement type — `lib.rs::classify` maps keys onto it; lazy:
+  `None` until the first move, `Bottom` enters at the last row), and `clamp`
+  keeps it in range after a refresh.
 - `open.rs` — `open::url` opens a URL in the default browser via the platform
   opener (`open` / `xdg-open` / `cmd /C start`), spawned detached; rejects
   non-`http(s)` URLs; no new dep.
@@ -172,22 +197,70 @@ everything else is testable modules:
   otherwise, hence the "copied N links" wording.
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
-- `term.rs` — Unix terminal helper: while watching, quiet stdin (drop echo +
-  line buffering, keep `ISIG` so signal keys work) and turn the interval wait
-  into a poll. `wait` returns a semantic `Wait` for each normal-mode key — `r`
-  refresh, `Tab` switch view, `?` help, `/` search, Enter open, `y`/`Y` copy
-  row/section, lone Esc
-  cancel(-filter), and the movement keys (`j`/`k`, arrows, `g`/`G`,
-  `Ctrl-D`/`Ctrl-U`); `read_search` returns raw `SearchKey`s (char/backspace/
-  enter/esc) for the search prompt (no key-repeat collapse, so live filtering
-  keeps up). A resize (SIGWINCH) or a resume from Ctrl-Z sets an atomic flag
-  that the poll turns into a `Wait::Redraw` / `SearchKey::Redraw`, so the pinned
-  frame — which is laid out for a specific terminal height — is repainted at the
-  new size without waiting for a key or refetching. Ctrl-Z hands the whole
-  screen back (leaves the alternate screen) and `fg` takes it again.
-  `height()` (`TIOCGWINSZ`) sizes both the half-page jump and the pinned frame.
-  Restored on every exit path; a no-op on non-Unix.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
+
+`run()` first creates a `uncurses::terminal::Terminal::stdio()`; interactivity is
+its `is_terminal().1` (output a TTY?). When the output is **not** a TTY (piped,
+redirected), `render_once` paints the dashboard onto an offscreen `TextBuffer`
+sized to its content (a generous `height_bound` + `bottom_bound`, then cropped to
+the painted height), and `encode_with`s it to the terminal's output (`Terminal::output`)
+using the **detected** color `Profile` (`Profile::detect_from`), so it's colored on
+a TTY and plain when piped. Interactive `--once` instead runs `run_once_interactive`:
+an *inline* `Program` (raw mode, hidden cursor) shows a `Loading...` frame while the
+fetch runs on a background thread, so keystrokes don't echo and `q`/`Esc`/`Ctrl-C`
+aborts mid-fetch; on success the dashboard replaces the frame and is left inline
+(`Program::finish` doesn't wipe an inline surface). Otherwise the same `Terminal` is
+moved into `App::start` → `Program::new(terminal)`. The watch redraw and the inline
+one-shot frame share `render_dashboard`, which has two layouts: **pinned** (the
+watch, in the alternate screen) fills the terminal, scrolls the body under a
+bottom block glued to the last rows, and **unpinned** (the inline one-shot) sizes
+the surface to the content and crops to the painted height.
+
+The interactive watch is `lib.rs::App`, following the uncurses example **`App`
+pattern**: the struct owns the `uncurses::Program` plus all dashboard state, and
+`run()` does `let mut app = App::start(terminal, ...)?; let result = app.run();
+app.stop()?; result`. `start` builds the screen from the `Terminal` and brings it
+up (raw mode, hidden cursor, keeping the terminal's detected color profile), then
+paints the startup frame: a cached dashboard if one exists (entering the alt screen
+straight away), otherwise an **inline** `Loading...` frame. `run` resolves
+`me`/default branch then loops fetch → paint → wait, returning `Ok(())` on a quit
+key. The first live paint calls `enter_alt` (once), which drops the inline frame to
+zero rows and switches to the alt screen — so loading looks like ordinary command
+output before the dashboard takes over the screen. `stop` consumes the app and calls
+**`Program::finish`** (the idiomatic teardown: exit alt-screen, show cursor, leave
+raw mode). Because the caller always runs `stop`, the terminal is restored on
+every path — a clean quit, a `?`-operator error, or a failed first paint (`start`
+calls `stop` itself before bailing). Each frame is painted by `redraw` →
+`render_dashboard`, which pins the frame once `in_alt` is set: `paint_body` and
+`paint_bottom` each paint into their own `TextBuffer`, and `render::compose`
+places them. The managed area is **never** refitted per frame — that would
+re-query the terminal on every redraw (and, before uncurses 0.0.2, forced a
+clear + full repaint: the screen erased and rewrote itself every frame instead
+of the renderer emitting a diff, which is what flicker looks like). It is sized
+in exactly two places. `autoresize` is called once, in `enter_alt`: it is the
+only call that queries the terminal for its row count, which is needed right
+after the inline frame is collapsed to zero rows, and it fits the area to the
+whole window — correct precisely because we just took the alt screen. A resize
+event instead carries its own dimensions, so `Action::Resize` / `SearchAction::
+Resize` call `Screen::resize` with them and skip the query; inline (the loading
+frame, before `in_alt`) the reported height is the *window's*, so the managed
+area keeps its own height and follows only the width. `Program::init` does not
+probe the terminal, so `start` calls **`query_capabilities`**: reading an event
+records the reply as it passes through, and the DECRPM 2026 answer is what
+enables **synchronized output**, so a frame that clears first (a resize) is
+presented atomically rather than seen half-drawn. The same query also adopts
+grapheme clustering and in-band resize where the terminal supports them. The
+loop uses `poll_event` with
+the interval as the timeout. Keys are classified into an `Action` (or, while the
+search prompt is open, a `SearchAction`) with `Key::matches`, which is
+**case-sensitive** — bindings must list both cases (`["r", "R"]`). `r`/`R`
+refresh now, `Tab` switches view, `?` toggles help, `/` opens search, `Enter`
+opens the selected row, `y`/`Y` copy links, the movement keys drive the cursor,
+`q`/`Q`/`Ctrl-C` quit (`Esc` clears the filter, or quits when there is none),
+`Ctrl-Z` suspends/resumes, `Resize` repaints. All watch UI state lives in one
+`Ui` struct (view, help, selection, search, `--branch`). `ctrlc` handles external
+SIGINT/SIGTERM/SIGHUP by asking the event loop to stop; the owning `Program`
+still performs all teardown through `finish`.
 
 ## Key behaviors
 
@@ -230,15 +303,16 @@ everything else is testable modules:
   line, and does not ring.
 - **Navigation / open:** a lazy selection cursor (`nav`, watch only) — `None`
   until the first movement key, then the chosen row is painted with the
-  selection background (`status::SURFACE`) for its full width — no caret glyph,
-  so the change marker still shows through (this works in the custom shipments
-  renderer too, whose 2-column gutter carries the same mark).
-  `j`/`k` (or the arrows) move one row, `g`/`G` jump to first/last,
-  `Ctrl-D`/`Ctrl-U` half a page (sized from `term::height`); Enter opens the
-  selected row — the PR, or a shipments release / the upcoming compare log — via
-  `open::url`. Every row across all sections of the active view is one target
-  (`nav::targets`, in render order); switching views drops the cursor and a
-  refresh `clamp`s it. `--once`/piped output has no selection.
+  selection background (`status::SURFACE`) edge to edge across the full width
+  (`render::highlight_row`, applied once the body is painted) — no caret glyph,
+  so the change marker still shows through, and the custom shipments painter is
+  covered for free. `j`/`k` (or the arrows) move one row, `g`/`G` jump to
+  first/last,
+  `Ctrl-D`/`Ctrl-U` half a page (sized from the screen's `window_cells`); Enter
+  opens the selected row — the PR, or a shipments release / the upcoming compare
+  log — via `open::url`. Every row across all sections of the active view is one
+  target (`nav::targets`, in render order); switching views drops the cursor and
+  a refresh `clamp`s it. `--once`/piped output has no selection.
 - **Copy:** `y` copies the selected row's link, `Y` every link of the section the
   cursor is in (`nav::section_at`) as a markdown list (`- <url>` per line, no
   trailing newline). Both honor the active search filter, so `Y` copies only the
@@ -249,50 +323,57 @@ everything else is testable modules:
 - **Search / filter:** `/` opens a search prompt (`Ui.searching`); typing filters
   the rows live (case-insensitive substring over number/title/author/release
   tag), Enter applies the filter and returns to the list, Esc (or a lone Esc from
-  the list) clears it. `poll` reads `term::read_search` while the prompt is open,
-  else normal keys. `nav::filter` produces the rendered rows and `nav::targets(…,
-  query)` the navigable ones from the **same** predicate, so the caret/open track
-  the visible matches; the cursor resets on each edit. Watch mode only.
-- **Cache:** on a watch start, prowl paints the cached `Sections` immediately,
-  seeds change-detection from it
+  the list) clears it — and with no filter to clear, Esc quits. While the prompt
+  is open every keystroke is text (`classify_search`), else keys are normal-mode
+  actions (`classify`). `nav::filter` produces the rendered rows and
+  `nav::targets(…, query)` the navigable ones from the **same** predicate, so the
+  caret/open track the visible matches; the selection resets on each edit. The
+  prompt uses the **terminal's own cursor**: `paint_search_prompt` returns the
+  caret cell, `paint_dashboard` passes it up only while `searching`, and
+  `render_dashboard` stages it with `Screen::set_cursor_position` (declarative —
+  `render` re-applies it every frame) or `clear_cursor_position`. `App` tracks
+  `cursor_shown` and only calls `show_cursor`/`hide_cursor` on a transition,
+  since both always emit DECTCEM. Watch mode only.
+- **Cache:** on a watch start, prowl paints the cached `Sections` immediately
+  (entering the alt screen straight away), seeds change-detection from it
   so the first live refresh highlights what changed while prowl wasn't running,
-  but stays silent (no startup bell). `--no-cache` skips both read and write.
-- **Terminal:** while watching, prowl takes the terminal over — the alternate
-  screen (so the shell's scrollback is handed back untouched on exit), autowrap
-  off (the pinned frame assumes one screen row per rendered line, so an
-  over-long line is clipped rather than wrapped), the cursor hidden, and stdin
-  echo/line buffering turned off, so stray keystrokes neither garble the
-  dashboard nor
-  spill into the shell; signal keys (Ctrl-C/Ctrl-Z) still fire. `r`/`R` forces a
-  refresh now; `Tab` switches view; `?` toggles the help legend
-  (contextual to the active view — mergeability glyphs for Mine, review glyphs
-  for Reviews — hidden by default, rendered at the top of the bottom block, above
-  the search prompt and footer whose keys it documents; `--no-help` only affects one-shot/piped output). The movement keys
-  (`j`/`k`, arrows, `g`/`G`, `Ctrl-D`/`Ctrl-U`) drive the selection cursor,
-  Enter opens it, `y`/`Y` copy it (row / whole section), and `/` filters (Esc
-  clears). The bottom block — help legend, search
-  prompt, error line, footer — is glued to the last rows of the
-  screen (`render::frame`), and the sections scroll under it, following the
-  selection. The only persistent
+  but stays silent (no startup bell). With no cache it shows an inline
+  `Loading...` frame and enters the alt screen only once the first fetch lands.
+  `--no-cache` skips both read and write.
+- **Terminal:** the watch runs on a `uncurses::Program` in the alternate screen
+  with the cursor hidden (it reappears only in the search prompt); raw mode means stray keystrokes never garble the
+  dashboard or spill into the shell. `r`/`R` forces a refresh now; `Tab` switches
+  view; `?` toggles the help legend (contextual to the active view —
+  mergeability glyphs for Mine, review glyphs for Reviews — hidden by
+  default, rendered at the top of the bottom block, above the search prompt and
+  footer whose keys it documents; `--no-help` only affects
+  one-shot/piped output). The movement keys (`j`/`k`, arrows, `g`/`G`,
+  `Ctrl-D`/`Ctrl-U`) drive the selection cursor, Enter opens it, `y`/`Y` copy it
+  (row / whole section), and `/` filters.
+  `q`/`Q`/`Ctrl-C` quit (as does `Esc` with no filter applied) and `Ctrl-Z`
+  suspends/resumes. The bottom block — help legend, search prompt, error line,
+  footer — is **pinned** to the last rows of the screen (`render::compose`), and
+  the sections scroll under it, following the selection. The only persistent
   bottom line is the footer
   (`r refresh (every 5m) - tab switch view - enter open - y copy - / search - ?
-  help`),
-  which carries
-  the
-  refresh
-  interval; a failed refresh adds a dim `error: …` line above it (the same slot
-  a copy's `copied N links` confirmation uses). While a fetch
-  is in flight the footer reads `r refreshing` with the `r` glyph dimmed and `r`
-  presses discarded (navigation, search, Tab and `?` stay live); it reverts to
-  `r refresh (every 5m)` once the fetch finishes. The blocking
-  fetch runs on a worker thread (`std::thread::scope`) while the main thread
-  keeps polling input, so navigation, `?` and `Tab` stay responsive even
-  mid-refresh. A resize or a resume from Ctrl-Z repaints the frame at the new
-  size on its own. The cursor, autowrap, the alternate screen and the terminal
-  mode are all
-  restored on every normal or early (`?`-operator) return (Drop guards) and on
-  SIGINT/SIGTERM/SIGHUP (the `ctrlc` handler, `termination` feature), which skip
-  destructors.
+  help`), which carries the refresh interval; a failed refresh adds a dim
+  `error: …` line above it (the same slot a copy's `copied N links`
+  confirmation uses). While a fetch is in flight the footer reads `r refreshing` with the
+  `r` glyph dimmed. Every fetch (and the one-time `me`/default-branch resolution)
+  runs on a **detached background thread** and returns over a channel; the main
+  thread only polls input and paints, so network I/O never blocks the UI —
+  navigation, search, `Tab`, `?`, resize and suspend stay live mid-refresh and
+  **quit is instant** (a quit abandons the in-flight request, which is reaped at
+  process exit). The terminal is restored on every exit path by `App::stop`
+  (`Program::finish`), which the caller always runs after `App::run`; external
+  SIGINT/SIGTERM/SIGHUP use the same cooperative path. Pinned staging buffers
+  inherit the live screen's grapheme and East Asian width policy.
+- **Interactive `--once`:** `run_once_interactive` brings up an *inline* `Program`
+  (raw mode, hidden cursor) and paints a `Loading...` frame while the fetch runs on
+  a background thread, so keystrokes don't echo and `q`/`Esc`/`Ctrl-C` aborts the
+  fetch instantly. On success the dashboard replaces the frame and is left inline in
+  the terminal; on abort the frame is wiped. `Program::finish` restores the terminal
+  on every path. Piped/non-TTY output keeps the plain `render_once` encode path.
 
 ## The GraphQL queries + REST (see `model.rs` / `commits.rs`)
 
@@ -342,8 +423,9 @@ and `cargo audit` for dependency advisories (the `audit` job) on push and PRs.
 
 `task screenshot` regenerates it. `examples/demo.rs` builds a fake `Sections`
 (made-up repo, PRs and authors; timestamps relative to now) and prints it
-through the real `render_body` + `render::footer`/`help`, so the shot can't
-drift from the layout — which is why `Sections`, `render_body` and `bottom` are
+through the real `render_to_string` — the same painters `--once` uses — so the
+shot can't drift from the layout, which is why `Sections`, `Ui` and
+`render_to_string` are
 `pub`, same as everything else the offline tests reach. `demo.tape` shoots it
 with [vhs](https://github.com/charmbracelet/vhs) (Nerd Font, Catppuccin Mocha;
 the trailing `Sleep` is required or vhs exits before writing the file), and the

@@ -16,10 +16,9 @@
 #![allow(clippy::struct_field_names)] // serde structs mirror GitHub's JSON field names
 #![allow(clippy::implicit_hasher)] // internal HashSet params use the one default hasher
 #![allow(clippy::needless_pass_by_value)] // by-value serde_json::Value is the ergonomic form
-#![allow(clippy::borrow_as_ptr)] // FFI-boundary `&x` coercions read clearer than ptr::from_ref
-#![allow(clippy::needless_raw_string_hashes)] // `r#"…"#` is the convention for query blocks
-#![allow(clippy::format_push_string)]
-// The few numeric casts are bounded/guarded (poll timeout, non-negative display
+#![allow(clippy::needless_raw_string_hashes)]
+// `r#"…"#` is the convention for query blocks
+// The few numeric casts are bounded/guarded (surface rows, non-negative display
 // seconds); the one size-sensitive calc — the duration parser — uses checked_mul.
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -41,7 +40,6 @@ pub mod queue;
 pub mod render;
 pub mod reviews;
 pub mod status;
-pub mod term;
 pub mod timefmt;
 
 use anyhow::{Context, Result};
@@ -49,8 +47,25 @@ use changes::{Changes, Tracker};
 use clap::Parser;
 use cli::{Cli, View};
 use github::{Client, Repo};
-use std::io::{IsTerminal, Write};
-use unicode_width::UnicodeWidthStr;
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+use uncurses::buffer::{Bounded, SurfaceMut, TextBuffer};
+use uncurses::color::{Color, Profile};
+use uncurses::event::{Event, KeyCode, KeyModifiers};
+use uncurses::layout::Position;
+use uncurses::program::Program;
+use uncurses::screen::Screen;
+use uncurses::style::Style;
+use uncurses::terminal::{Stdin, Stdout, Terminal};
+use uncurses::text::{Encode, TextSurface};
+
+const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(60);
+static TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+fn termination_requested() -> bool {
+    TERMINATION_REQUESTED.load(Ordering::Acquire)
+}
 
 /// A fetched snapshot of every enabled section (`None` = section disabled).
 /// Public only so the offline fixture tests and the `demo` example (which
@@ -67,6 +82,20 @@ pub struct Sections {
     pub reviews: Option<Vec<reviews::ReviewRow>>,
     /// Reviews view: merged PRs I reviewed.
     pub reviewed_merged: Option<Vec<reviews::ReviewedMergedRow>>,
+}
+
+impl Sections {
+    /// Every section disabled — painted as just the bottom (error/footer/help)
+    /// when a fetch fails before any data has arrived.
+    const EMPTY: Sections = Sections {
+        merged: None,
+        queue: None,
+        queue_next_eta: None,
+        prs: None,
+        commits: None,
+        reviews: None,
+        reviewed_merged: None,
+    };
 }
 
 /// Fetch the sections for the requested views. `want_mine` covers the Mine view
@@ -162,520 +191,676 @@ fn fetch(
     })
 }
 
-/// Render one PR section: a counted header, then either its table or, when
-/// empty, a dim placeholder. `table` is `None` exactly when the section is
-/// empty (empties are filtered out before alignment).
-fn section(
-    f: &mut String,
-    (title, accent): (&str, status::Rgb),
+/// Paint one PR section onto `s` at row `top`: a counted header (with an optional
+/// dim note), then either its table or, when empty, a dim placeholder, then a
+/// trailing blank row. Returns the next free row.
+#[allow(clippy::too_many_arguments)]
+fn paint_section(
+    s: &mut impl TextSurface,
+    title: &str,
+    accent: Color,
     count: usize,
     note: Option<&str>,
     empty_msg: &str,
     table: Option<&render::Table>,
-    styled: bool,
-) {
-    f.push_str(&render::header(
-        title,
-        accent,
-        Some(&count.to_string()),
-        note,
-        styled,
-    ));
-    f.push('\n');
-    if let Some(table) = table {
-        f.push_str(&render::render_table(table, styled));
-    } else {
-        f.push_str(&render::placeholder(empty_msg, render::ROW_INDENT, styled));
-        f.push('\n');
-    }
-    f.push('\n');
+    title_w: usize,
+    ascii: bool,
+    top: u16,
+) -> u16 {
+    let y = render::paint_header(s, title, accent, Some(&count.to_string()), note, ascii, top);
+    let y = match table {
+        Some(table) => render::paint_table(s, table, title_w, ascii, y),
+        None => render::paint_dim_at(s, empty_msg, render::ROW_INDENT, y),
+    };
+    y + 1
 }
 
-/// Render the body for `view` (no screen-clear, no footer). In watch mode it
-/// leads with the `my PRs / reviews` tab strip, then the active view's sections.
-/// Rows that changed since the previous refresh (per `changes`) are flagged with
-/// a leading marker. The footer and help legend are rendered separately (below
-/// the body) by `bottom`.
-pub fn render_body(
-    s: &Sections,
-    cli: &Cli,
-    view: View,
+/// Whether `table` has a `local`-th row — i.e. whether the selection landed on
+/// this section. Nothing is marked on the row itself: `paint_body` highlights
+/// the screen row once the whole body is painted.
+fn selects_row(table: Option<&render::Table>, local: usize) -> bool {
+    table.is_some_and(|t| t.rows.len() > local)
+}
+
+/// The screen row of a table's `local`-th data row, in a section painted from
+/// row `top`: the section header, then the table's own header row, then the data.
+/// Lets a view report where it drew the caret so the frame can scroll to it.
+fn caret_row(top: u16, local: usize) -> u16 {
+    top + 2 + local as u16
+}
+
+/// The Mine view: My open PRs, Merge Queue, My merged PRs, then My Shipments.
+/// Each section always shows its header (with a count); an empty section follows
+/// it with a dim placeholder. Returns the next free row and the row the selection
+/// caret landed on, if any.
+fn paint_mine(
+    s: &mut impl TextSurface,
+    sections: &Sections,
     changes: &Changes,
-    styled: bool,
     selected: Option<usize>,
-) -> String {
-    let mut f = String::new();
-    // The tab strip is an interactive affordance, so only while watching (styled
-    // implies a watch TTY); piped/`--once` output goes straight to the sections.
-    if styled {
-        f.push_str(&render::tabs(view, styled));
-        f.push_str("\n\n");
-    }
-    match view {
-        View::Mine => render_mine(&mut f, s, cli, changes, styled, selected),
-        View::Reviews => render_reviews(&mut f, s, cli, styled, selected),
-    }
-    render::highlight_selected(&f)
-}
-
-/// Paint `table`'s `local`-th row as the selected one (a no-op when there's no
-/// such table or row). Only a mark here — `render::highlight_selected` extends
-/// it across the whole rendered line once the body is assembled.
-fn select_row(table: Option<&mut render::Table>, local: usize) {
-    if let Some(row) = table.and_then(|t| t.rows.get_mut(local)) {
-        render::select_row(row);
-    }
-}
-
-/// The interactive dashboard state the watch loop threads through rendering and
-/// mutates on each keypress.
-struct Ui {
-    /// Active view; starts at `--view`, toggled with Tab.
-    view: View,
-    /// Whether the `?` help legend is shown (starts hidden).
-    show_help: bool,
-    /// Navigation cursor into the active view's (filtered) rows — lazy (`None`
-    /// until the user moves it), reset when switching views or changing the
-    /// search, clamped when a refresh shrinks the list.
-    selected: Option<usize>,
-    /// The trailing status line, empty unless a refresh or an open failed.
-    last_status: String,
-    /// The active search query; empty means no filter is applied.
-    search: String,
-    /// Whether the search prompt is open and capturing text.
-    searching: bool,
-}
-
-/// What the watch loop should do after a keypress.
-enum Act {
-    /// `r`, or the interval elapsed: (re)fetch now.
-    Refresh,
-    /// State changed — repaint the dashboard.
-    Repaint,
-    /// Nothing to do.
-    Idle,
-}
-
-impl Ui {
-    /// Classify a normal-mode keypress into the loop's next `Act`, applying its
-    /// state change (help, view switch, search, open, movement). Shared by the
-    /// idle wait and the mid-fetch poll so both react to keys identically.
-    fn on_key(&mut self, action: term::Wait, last_good: Option<&Sections>, styled: bool) -> Act {
-        match action {
-            term::Wait::Tick | term::Wait::Refresh => Act::Refresh,
-            // A resize or a resume from Ctrl-Z: nothing changed but the screen.
-            term::Wait::Redraw => Act::Repaint,
-            term::Wait::ToggleHelp => {
-                self.show_help = !self.show_help;
-                Act::Repaint
-            }
-            term::Wait::SwitchView => {
-                // Selection indices don't carry across views, so start fresh.
-                self.view = self.view.toggle();
-                self.selected = None;
-                Act::Repaint
-            }
-            term::Wait::Search => {
-                self.searching = true;
-                Act::Repaint
-            }
-            term::Wait::Cancel => {
-                // Esc clears an applied filter; otherwise it's a no-op.
-                if self.search.is_empty() {
-                    Act::Idle
-                } else {
-                    self.search.clear();
-                    self.selected = None;
-                    Act::Repaint
-                }
-            }
-            term::Wait::Open => {
-                if self.open_selected(last_good, styled) {
-                    Act::Repaint
-                } else {
-                    Act::Idle
-                }
-            }
-            term::Wait::Copy => self.copy_selected(last_good, styled),
-            term::Wait::CopySection => self.copy_section(last_good, styled),
-            _ => {
-                let len = last_good.map_or(0, |s| nav::targets(self.view, s, &self.search).len());
-                let half = term::height().map_or(10, |h| usize::from(h / 2).max(1));
-                let next = nav::moved(action, self.selected, len, half);
-                if next == self.selected {
-                    Act::Idle
-                } else {
-                    self.selected = next;
-                    Act::Repaint
-                }
-            }
-        }
-    }
-
-    /// Apply a search-prompt keystroke while the prompt is open. Typing filters
-    /// live (resetting the cursor), Enter applies the filter and closes the
-    /// prompt, Esc clears the filter and closes it.
-    fn on_search_key(&mut self, key: term::SearchKey) -> Act {
-        match key {
-            term::SearchKey::Tick => Act::Refresh,
-            term::SearchKey::Redraw => Act::Repaint,
-            term::SearchKey::Char(c) => {
-                self.search.push(c);
-                self.selected = None;
-                Act::Repaint
-            }
-            term::SearchKey::Backspace => {
-                self.search.pop();
-                self.selected = None;
-                Act::Repaint
-            }
-            term::SearchKey::Enter => {
-                self.searching = false;
-                Act::Repaint
-            }
-            term::SearchKey::Esc => {
-                self.search.clear();
-                self.searching = false;
-                Act::Repaint
-            }
-        }
-    }
-
-    /// The URL under the selection cursor: `None` without a selection, without
-    /// data, or if the cursor has fallen off the (filtered) list.
-    fn selected_url<'a>(&self, last_good: Option<&'a Sections>) -> Option<&'a str> {
-        let sel = self.selected?;
-        nav::targets(self.view, last_good?, &self.search)
-            .get(sel)
-            .copied()
-    }
-
-    /// Open the selected row's URL in the browser. Returns whether the frame
-    /// should be repainted — only when opening failed (a dim error line is set);
-    /// a no-op (no selection / no data / success) leaves the screen as is.
-    fn open_selected(&mut self, last_good: Option<&Sections>, styled: bool) -> bool {
-        let Some(url) = self.selected_url(last_good) else {
-            return false;
-        };
-        if let Err(e) = open::url(url) {
-            self.last_status = error_trailing(&format!("open failed: {e}"), styled);
-            return true;
-        }
-        false
-    }
-
-    /// `y`: copy the selected row's link. A no-op without a selection or data.
-    fn copy_selected(&mut self, last_good: Option<&Sections>, styled: bool) -> Act {
-        match self.selected_url(last_good) {
-            Some(url) => self.copy(url, 1, styled),
-            None => Act::Idle,
-        }
-    }
-
-    /// `Y`: copy every link of the section the cursor is in, as a markdown list.
-    /// With no selection that's the first non-empty section, matching where a
-    /// movement key would enter. Honors the active search filter, like `targets`.
-    fn copy_section(&mut self, last_good: Option<&Sections>, styled: bool) -> Act {
-        let Some(good) = last_good else {
-            return Act::Idle;
-        };
-        let urls = nav::section_at(
-            self.view,
-            good,
-            &self.search,
-            self.selected.unwrap_or_default(),
-        );
-        if urls.is_empty() {
-            return Act::Idle;
-        }
-        let list = urls
-            .iter()
-            .map(|u| format!("- {u}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        self.copy(&list, urls.len(), styled)
-    }
-
-    /// Hand `text` (`n` links) to the terminal's clipboard and report it on the
-    /// trailing status line, which the next refresh clears.
-    fn copy(&mut self, text: &str, n: usize, styled: bool) -> Act {
-        let plural = if n == 1 { "" } else { "s" };
-        self.last_status = match clipboard::copy(text) {
-            Ok(()) => note_trailing(&format!("copied {n} link{plural}"), styled),
-            Err(e) => error_trailing(&format!("copy failed: {e}"), styled),
-        };
-        Act::Repaint
-    }
-}
-
-/// Wait for input (or the deadline) and apply it, returning what the loop should
-/// do. Reads search-prompt text when the prompt is open, else normal-mode keys.
-fn poll(
-    ui: &mut Ui,
-    deadline: std::time::Instant,
-    last_good: Option<&Sections>,
-    styled: bool,
-) -> Act {
-    if ui.searching {
-        let mut act = Act::Idle;
-        for key in term::read_search(deadline) {
-            match ui.on_search_key(key) {
-                Act::Refresh => return Act::Refresh,
-                Act::Repaint => act = Act::Repaint,
-                Act::Idle => {}
-            }
-        }
-        act
-    } else {
-        ui.on_key(term::wait(deadline), last_good, styled)
-    }
-}
-
-/// The Mine view: My open PRs, then Merge Queue, then My merged PRs, then My
-/// Shipments. Each section always shows its header (with a count); an empty
-/// section follows it with a dim placeholder one-liner.
-fn render_mine(
-    f: &mut String,
-    s: &Sections,
-    cli: &Cli,
-    changes: &Changes,
-    styled: bool,
-    selected: Option<usize>,
-) {
-    let ascii = cli.ascii || !styled;
-
-    // Build the section tables first, then cap and align their TITLE columns so
-    // the three tables line up and the whole view stays within MAX_WIDTH.
-    let mut prs_table = s
+    ascii: bool,
+    branch: bool,
+    top: u16,
+) -> (u16, Option<u16>) {
+    let prs_table = sections
         .prs
         .as_ref()
         .filter(|r| !r.is_empty())
-        .map(|rows| prs::to_table(rows, ascii, &changes.status_changed, cli.branch));
-    let mut queue_table = s
+        .map(|rows| prs::to_table(rows, ascii, &changes.status_changed, branch));
+    let queue_table = sections
         .queue
         .as_ref()
         .filter(|r| !r.is_empty())
         .map(|rows| queue::to_table(rows, ascii));
-    let mut merged_table = s
+    let merged_table = sections
         .merged
         .as_ref()
         .filter(|r| !r.is_empty())
         .map(|rows| merged::to_table(rows, ascii, &changes.newly_merged));
-    {
-        let mut tables: Vec<&mut render::Table> = [
-            prs_table.as_mut(),
-            queue_table.as_mut(),
-            merged_table.as_mut(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        render::fit_titles(&mut tables, ascii);
-    }
 
-    // Mark the selected row: map the global selection onto the section it
-    // falls in. Every PR/queue/merged row is navigable, so the local index is
-    // the offset past the earlier sections; any remainder indexes the shipments'
-    // navigable rows (handled by `render_commits`).
+    // Locate the selection: map the global selection onto the section it falls
+    // in. Every PR/queue/merged row is navigable, so the local index is the
+    // offset past the earlier sections; any remainder indexes the shipments'
+    // navigable rows (handled by `paint_commits`).
     let mut ship_sel = None;
+    // Which section's table holds the selection, and at which of its rows — the
+    // screen row it ends up on isn't known until that section is painted.
+    let (mut prs_sel, mut queue_sel, mut merged_sel) = (None, None, None);
     if let Some(sel) = selected {
-        let np = s.prs.as_ref().map_or(0, Vec::len);
-        let nq = s.queue.as_ref().map_or(0, Vec::len);
-        let nm = s.merged.as_ref().map_or(0, Vec::len);
+        let np = sections.prs.as_ref().map_or(0, Vec::len);
+        let nq = sections.queue.as_ref().map_or(0, Vec::len);
+        let nm = sections.merged.as_ref().map_or(0, Vec::len);
         if sel < np {
-            select_row(prs_table.as_mut(), sel);
+            prs_sel = selects_row(prs_table.as_ref(), sel).then_some(sel);
         } else if sel < np + nq {
-            select_row(queue_table.as_mut(), sel - np);
+            let local = sel - np;
+            queue_sel = selects_row(queue_table.as_ref(), local).then_some(local);
         } else if sel < np + nq + nm {
-            select_row(merged_table.as_mut(), sel - np - nq);
+            let local = sel - np - nq;
+            merged_sel = selects_row(merged_table.as_ref(), local).then_some(local);
         } else {
             ship_sel = Some(sel - np - nq - nm);
         }
     }
 
-    if let Some(rows) = &s.prs {
-        section(
-            f,
-            ("My open PRs", status::GREEN),
+    // The shared TITLE width keeps the tables aligned and the view within
+    // MAX_WIDTH; pass it to every section so the columns line up.
+    let title_w = title_width(s, [&prs_table, &queue_table, &merged_table]);
+
+    let mut y = top;
+    let mut caret = None;
+    if let Some(rows) = &sections.prs {
+        caret = caret.or(prs_sel.map(|l| caret_row(y, l)));
+        y = paint_section(
+            s,
+            "My open PRs",
+            status::GREEN,
             rows.len(),
             None,
             "No open PRs.",
             prs_table.as_ref(),
-            styled,
+            title_w,
+            ascii,
+            y,
         );
     }
-
-    if let Some(rows) = &s.queue {
+    if let Some(rows) = &sections.queue {
         // The queue-level ETA (time until a newly added entry would merge) rides
         // alongside the header as a dim note.
-        let eta = s.queue_next_eta.map(|secs| {
+        caret = caret.or(queue_sel.map(|l| caret_row(y, l)));
+        let eta = sections.queue_next_eta.map(|secs| {
             format!(
                 "~{} to merge",
-                timefmt::eta(std::time::Duration::from_secs(secs.max(0) as u64))
+                timefmt::eta(Duration::from_secs(secs.max(0) as u64))
             )
         });
-        section(
-            f,
-            ("Merge Queue", status::PEACH),
+        y = paint_section(
+            s,
+            "Merge Queue",
+            status::PEACH,
             rows.len(),
             eta.as_deref(),
             "No merge queue.",
             queue_table.as_ref(),
-            styled,
+            title_w,
+            ascii,
+            y,
         );
     }
-
-    if let Some(rows) = &s.merged {
-        section(
-            f,
-            ("My merged PRs", status::MAUVE),
+    if let Some(rows) = &sections.merged {
+        caret = caret.or(merged_sel.map(|l| caret_row(y, l)));
+        y = paint_section(
+            s,
+            "My merged PRs",
+            status::MAUVE,
             rows.len(),
             None,
             "No recent merged PRs.",
             merged_table.as_ref(),
-            styled,
+            title_w,
+            ascii,
+            y,
         );
     }
-
-    if let Some(stats) = &s.commits {
-        render_commits(f, stats, ship_sel, styled);
-        f.push('\n');
+    if let Some(stats) = &sections.commits {
+        let (next, ship_caret) = paint_commits(s, stats, ship_sel, ascii, y);
+        y = next + 1;
+        caret = caret.or(ship_caret);
     }
+    (y, caret)
 }
 
 /// The Reviews view: PRs to review (with a per-row review-state glyph), then
-/// merged PRs I reviewed. Their TITLE columns are aligned together.
-fn render_reviews(f: &mut String, s: &Sections, cli: &Cli, styled: bool, selected: Option<usize>) {
-    let ascii = cli.ascii || !styled;
-
-    let mut open_table = s
+/// merged PRs I reviewed. Their TITLE columns are aligned together. Returns the
+/// next free row and the row the selection caret landed on, if any.
+fn paint_reviews(
+    s: &mut impl TextSurface,
+    sections: &Sections,
+    selected: Option<usize>,
+    ascii: bool,
+    top: u16,
+) -> (u16, Option<u16>) {
+    let open_table = sections
         .reviews
         .as_ref()
         .filter(|r| !r.is_empty())
         .map(|rows| reviews::open_to_table(rows, ascii));
-    let mut merged_table = s
+    let merged_table = sections
         .reviewed_merged
         .as_ref()
         .filter(|r| !r.is_empty())
         .map(|rows| reviews::merged_to_table(rows, ascii));
-    {
-        let mut tables: Vec<&mut render::Table> = [open_table.as_mut(), merged_table.as_mut()]
-            .into_iter()
-            .flatten()
-            .collect();
-        render::fit_titles(&mut tables, ascii);
-    }
 
-    // Mark the selected row: the open reviews come first, then the reviewed
-    // & merged rows, so the selection index past the open rows indexes the latter.
+    // The open reviews come first, then the reviewed & merged rows, so a
+    // selection index past the open rows indexes the latter.
+    let (mut open_sel, mut merged_sel) = (None, None);
     if let Some(sel) = selected {
-        let nr = s.reviews.as_ref().map_or(0, Vec::len);
+        let nr = sections.reviews.as_ref().map_or(0, Vec::len);
         if sel < nr {
-            select_row(open_table.as_mut(), sel);
+            open_sel = selects_row(open_table.as_ref(), sel).then_some(sel);
         } else {
-            select_row(merged_table.as_mut(), sel - nr);
+            let local = sel - nr;
+            merged_sel = selects_row(merged_table.as_ref(), local).then_some(local);
         }
     }
 
-    if let Some(rows) = &s.reviews {
-        section(
-            f,
-            ("Reviews", status::LAVENDER),
+    let title_w = title_width(s, [&open_table, &merged_table]);
+
+    let mut y = top;
+    let mut caret = None;
+    if let Some(rows) = &sections.reviews {
+        caret = open_sel.map(|l| caret_row(y, l));
+        y = paint_section(
+            s,
+            "Reviews",
+            status::LAVENDER,
             rows.len(),
             None,
             "No PRs to review.",
             open_table.as_ref(),
-            styled,
+            title_w,
+            ascii,
+            y,
         );
     }
-
-    if let Some(rows) = &s.reviewed_merged {
-        section(
-            f,
-            ("Reviewed & merged", status::MAUVE),
+    if let Some(rows) = &sections.reviewed_merged {
+        caret = caret.or(merged_sel.map(|l| caret_row(y, l)));
+        y = paint_section(
+            s,
+            "Reviewed & merged",
+            status::MAUVE,
             rows.len(),
             None,
             "No reviewed PRs merged recently.",
             merged_table.as_ref(),
-            styled,
+            title_w,
+            ascii,
+            y,
         );
     }
+    (y, caret)
 }
 
-/// The help legend for `view` (the glyphs that view uses), shown at the top of
-/// the bottom block. Empty (no leading/trailing blank) when `show_help` is
-/// false; ends with a newline otherwise.
-fn help_block(cli: &Cli, view: View, show_help: bool, styled: bool) -> String {
-    if !show_help {
-        return String::new();
+/// The shared TITLE column width across the present tables of one view.
+fn title_width<const N: usize>(s: &impl TextSurface, tables: [&Option<render::Table>; N]) -> usize {
+    let present: Vec<&render::Table> = tables.into_iter().flatten().collect();
+    render::title_width(s, &present)
+}
+
+/// Paint the dashboard's body onto `s` from row `top`: the watch-only tab strip
+/// and the active view's sections. Rows that changed since the previous refresh
+/// (per `changes`) are flagged with a leading marker. `tabs` is set only while
+/// watching, since the view switcher is an interactive affordance. `ascii`
+/// selects letters/parens over Nerd Font glyphs/bars; colors are written as
+/// styles and downsampled by the surface's `Profile` at encode/render time.
+///
+/// Returns the next free row and the row the selection caret landed on — what
+/// the pinned watch frame scrolls to keep in view.
+fn paint_body(
+    s: &mut impl TextSurface,
+    sections: &Sections,
+    ui: &Ui,
+    changes: &Changes,
+    ascii: bool,
+    tabs: bool,
+    top: u16,
+) -> (u16, Option<u16>) {
+    let mut y = top;
+    if tabs {
+        y = render::paint_tabs(s, ui.view, ascii, y) + 1;
     }
-    let ascii = cli.ascii || !styled;
-    render::help(view, ascii, styled)
+    let (y, caret) = match ui.view {
+        View::Mine => paint_mine(s, sections, changes, ui.selected, ascii, ui.branch, y),
+        View::Reviews => paint_reviews(s, sections, ui.selected, ascii, y),
+    };
+    // Highlight the selected row once the whole body is painted, so the bar
+    // spans the content and covers the hand-laid-out shipments section too.
+    if let Some(row) = caret {
+        render::highlight_row(s, row);
+    }
+    (y, caret)
 }
 
-/// Compose the bottom of the frame in order: the help legend first (empty
-/// unless it is toggled on), then the search prompt (empty unless a search is
-/// active), an error line (empty unless a refresh failed), and (watch only) the
-/// key-hint footer last — the legend explains the keys, so it reads above them
-/// rather than pushing them up. Any part may be empty to omit it; present parts
-/// are separated by a single blank line. The render body already ends with a
-/// blank line, so the first part is not prefixed.
-pub fn bottom(search: &str, status: &str, footer: &str, help: &str) -> String {
-    let mut out = String::new();
-    for part in [help, search, status, footer] {
-        if part.is_empty() {
-            continue;
+/// Paint the dashboard's bottom block onto `s` from row `top`: the help legend,
+/// the optional search prompt, `error:` line, then the footer last — the legend
+/// explains the keys the footer lists, so it reads above them rather than
+/// pushing them up. Each part is separated from the previous by one blank row
+/// (the body's trailing blank serves as the first). While watching this block is
+/// pinned to the last rows of the screen.
+///
+/// Returns the next free row and, while the search prompt is capturing, where
+/// the terminal's own cursor should rest (relative to `s`).
+fn paint_bottom(
+    s: &mut impl TextSurface,
+    sections: &Sections,
+    ui: &Ui,
+    status: &str,
+    footer: Option<(&str, bool)>,
+    ascii: bool,
+    top: u16,
+) -> (u16, Option<Position>) {
+    let mut y = top;
+    let mut painted = false;
+    let mut caret = None;
+    if ui.show_help {
+        y = render::paint_help(s, ui.view, ascii, y);
+        painted = true;
+    }
+    if !ui.search.is_empty() || ui.searching {
+        if painted {
+            y += 1;
         }
-        if !out.is_empty() {
-            out.push('\n');
+        let matches = nav::targets(ui.view, sections, &ui.search).len();
+        let (next, at) = render::paint_search_prompt(s, &ui.search, matches, ascii, y);
+        y = next;
+        // Only while the prompt is capturing: with the filter merely applied,
+        // the line is a static reminder and the cursor stays hidden.
+        caret = ui.searching.then_some(at);
+        painted = true;
+    }
+    if !status.is_empty() {
+        if painted {
+            y += 1;
         }
-        out.push_str(part);
-        if !part.ends_with('\n') {
-            out.push('\n');
+        y = render::paint_dim(s, status, y);
+        painted = true;
+    }
+    if let Some((interval, refreshing)) = footer {
+        if painted {
+            y += 1;
+        }
+        y = render::paint_footer(s, interval, refreshing, ascii, y);
+    }
+    (y, caret)
+}
+
+/// Paint the body and then the bottom block right under it, as one unpinned
+/// run of rows. Used for one-shot and piped output, and for the inline
+/// interactive frame — anywhere the dashboard is as tall as its content rather
+/// than laid out for a screen of a known height.
+fn paint_dashboard(
+    s: &mut impl TextSurface,
+    sections: &Sections,
+    ui: &Ui,
+    changes: &Changes,
+    status: &str,
+    footer: Option<(&str, bool)>,
+    ascii: bool,
+) -> (u16, Option<Position>) {
+    let (y, _) = paint_body(s, sections, ui, changes, ascii, footer.is_some(), 0);
+    paint_bottom(s, sections, ui, status, footer, ascii, y)
+}
+
+/// A safe upper bound on the dashboard body's height, used to size a surface
+/// before it is cropped to the painted height.
+fn height_bound(s: &Sections, ui: &Ui) -> u16 {
+    // Tabs + search + error + footer + slack.
+    let mut n = 10usize;
+    match ui.view {
+        View::Mine => {
+            n += s.prs.as_ref().map_or(0, |r| r.len() + 3);
+            n += s.queue.as_ref().map_or(0, |r| r.len() + 3);
+            n += s.merged.as_ref().map_or(0, |r| r.len() + 3);
+            // Header + one label row per bucket (upcoming + each release).
+            n += s.commits.as_ref().map_or(0, |c| c.releases.len() + 4);
+        }
+        View::Reviews => {
+            n += s.reviews.as_ref().map_or(0, |r| r.len() + 3);
+            n += s.reviewed_merged.as_ref().map_or(0, |r| r.len() + 3);
         }
     }
-    out
+    if ui.show_help {
+        n += render::help_height(ui.view) + 1;
+    }
+    n as u16
 }
 
-/// The sections to render for `ui`: `good` filtered by the active search, or
-/// `good` itself when there's no query. `buf` owns the filtered copy if one is
-/// made, so the returned reference stays valid for the caller.
-fn shown<'a>(good: &'a Sections, ui: &Ui, buf: &'a mut Option<Sections>) -> &'a Sections {
-    if ui.search.is_empty() {
-        good
+/// Paint the one-row `Loading...` startup frame (a single dim line) and render it.
+/// Shared by the watch's first paint when there's no cache and by interactive
+/// `--once`, so both show the identical loading frame.
+fn paint_loading(screen: &mut Screen<Stdout>) -> Result<()> {
+    screen.resize((screen.width().max(1), 1));
+    screen.clear();
+    render::paint_dim(screen, "Loading...", 0);
+    screen.render()?;
+    Ok(())
+}
+
+fn staging_buffer(surface: &impl TextSurface, width: u16, height: u16) -> TextBuffer {
+    TextBuffer::new(width, height)
+        .with_width_mode(surface.width_mode())
+        .with_eaw_wide(surface.eaw_wide())
+}
+
+fn ascii_mode(explicit: bool, profile: Profile) -> bool {
+    explicit || profile == Profile::Disabled
+}
+
+/// A safe upper bound on the bottom block's height (search prompt, error line,
+/// footer, help legend, and the blank row between each).
+fn bottom_bound(ui: &Ui) -> u16 {
+    let mut n = 6usize;
+    if ui.show_help {
+        n += render::help_height(ui.view) + 1;
+    }
+    n as u16
+}
+
+/// Paint the dashboard onto a `Screen` and render it.
+///
+/// `pinned` is the watch layout: the screen is the whole terminal, the bottom
+/// block (search prompt, error line, footer, help) is glued to its last rows,
+/// and the body scrolls under it to keep the selection caret in view. Unpinned
+/// — the inline interactive one-shot — the screen is instead sized to the
+/// dashboard's own height and the two are painted as one run of rows.
+///
+/// Returns the search caret's resting cell, if the prompt is capturing.
+#[allow(clippy::too_many_arguments)]
+fn render_dashboard(
+    screen: &mut Screen<Stdout>,
+    sections: &Sections,
+    ui: &Ui,
+    changes: &Changes,
+    status: &str,
+    footer: Option<(&str, bool)>,
+    ascii: bool,
+    pinned: bool,
+) -> Result<Option<Position>> {
+    let caret = if pinned {
+        // The managed area already fills the alternate screen: it is fitted on
+        // entry and refitted on every resize event, so there is nothing to do
+        // per frame. Refitting here would only re-query the terminal size on
+        // every redraw (and, before uncurses 0.0.2, force a clear + full
+        // repaint — the flicker this replaced).
+        let (w, rows) = (screen.width().max(1), screen.height().max(1));
+
+        // Body and bottom are painted into their own buffers because the frame
+        // places them independently: the body may be scrolled, the bottom is
+        // pinned to the last rows.
+        let mut body = staging_buffer(screen, w, height_bound(sections, ui).max(1));
+        let (body_h, sel) = paint_body(&mut body, sections, ui, changes, ascii, true, 0);
+        let mut bottom = staging_buffer(screen, w, bottom_bound(ui).max(1));
+        let (bottom_h, at) = paint_bottom(&mut bottom, sections, ui, status, footer, ascii, 0);
+
+        screen.clear();
+        let (top, cut) =
+            render::compose(screen, &mut body, body_h, &mut bottom, bottom_h, rows, sel);
+        // The prompt's caret is relative to the bottom block, which just moved —
+        // and whose head may have been cut off on a short terminal, taking the
+        // prompt with it.
+        at.filter(|p| p.y >= cut)
+            .map(|p| Position::new(p.x, top + (p.y - cut)))
     } else {
-        buf.insert(nav::filter(good, &ui.search))
+        let w = screen.width().max(1);
+        // Grow tall enough to paint everything, paint, then shrink to the height
+        // actually used so the surface is exactly the dashboard's line count.
+        screen.resize((w, (height_bound(sections, ui) + bottom_bound(ui)).max(1)));
+        screen.clear();
+        let (used, caret) = paint_dashboard(screen, sections, ui, changes, status, footer, ascii);
+        screen.resize((w, used.max(1)));
+        caret
+    };
+    // Steer the terminal's own cursor to the prompt, so the search line gets a
+    // real (blinking, shape-honoring) cursor instead of a painted stand-in.
+    match caret {
+        Some(pos) => screen.set_cursor_position(pos),
+        None => screen.clear_cursor_position(),
+    }
+    screen.render()?;
+    Ok(caret)
+}
+
+/// Paint a whole dashboard onto an offscreen [`TextBuffer`] sized to its content
+/// and encode it, `profile` deciding how much styling survives (`Disabled` drops
+/// SGR and hyperlinks, so piped output is plain). What `--once` writes to the
+/// terminal, and what the `demo` example renders fake data through, so the
+/// README screenshot can't drift from the real layout.
+pub fn render_to_string(
+    sections: &Sections,
+    ui: &Ui,
+    changes: &Changes,
+    footer: Option<(&str, bool)>,
+    ascii: bool,
+    profile: Profile,
+) -> String {
+    let w = render::MAX_WIDTH as u16;
+    let mut canvas = TextBuffer::new(w, height_bound(sections, ui) + bottom_bound(ui));
+    // One-shot output never searches, so there is no caret to place.
+    let (used, _) = paint_dashboard(&mut canvas, sections, ui, changes, "", footer, ascii);
+    canvas.resize(w, used.max(1));
+
+    let mut out = Vec::new();
+    canvas
+        .encode_with(&mut out, profile)
+        .expect("encoding to a Vec cannot fail");
+    String::from_utf8(out).expect("uncurses encodes valid UTF-8")
+}
+
+/// Render the dashboard once into an offscreen [`TextBuffer`] sized to its content,
+/// then encode it to the terminal's output with the **detected** color profile
+/// (plain when piped) and exit. Used by `--once` and non-TTY output.
+fn render_once(
+    terminal: &Terminal<Stdin, Stdout>,
+    sections: &Sections,
+    cli: &Cli,
+    changes: &Changes,
+    footer: Option<(&str, bool)>,
+) -> Result<()> {
+    let profile = Profile::detect_from(terminal.env(), terminal.is_terminal().1);
+    let ascii = ascii_mode(cli.ascii, profile);
+    // One-shot output has no interaction: no tabs, no selection, no search; the
+    // help legend follows `--no-help` instead of the `?` toggle.
+    let ui = Ui::once(cli);
+    let painted = render_to_string(sections, &ui, changes, footer, ascii, profile);
+
+    // A closed downstream pipe (`prowl --once | head`) is a clean exit, not an
+    // error worth printing.
+    let mut out = terminal.output();
+    let write = out
+        .write_all(painted.as_bytes())
+        .and_then(|()| out.write_all(b"\n"))
+        .and_then(|()| out.flush());
+    match write {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(e.into()),
     }
 }
 
-/// The search prompt line for `ui` (empty when no search is active). `shown` is
-/// the already-filtered sections, so its target count is the match count.
-fn search_line(ui: &Ui, shown: &Sections, styled: bool) -> String {
-    if ui.search.is_empty() && !ui.searching {
-        return String::new();
+/// Start an interactive program and restore it if any setup step fails after
+/// entering raw mode.
+fn start_program(terminal: Terminal<Stdin, Stdout>) -> Result<Program<Stdin, Stdout>> {
+    let mut program = Program::new(terminal)?;
+    let setup = (|| -> std::io::Result<()> {
+        program.init()?;
+        // `init` no longer probes the terminal, so ask: the reply is what lets
+        // the renderer bracket each frame in synchronized output.
+        program.query_capabilities(&[])?;
+        program.hide_cursor()
+    })();
+    if let Err(error) = setup {
+        let _ = program.finish();
+        return Err(error.into());
     }
-    let matches = nav::targets(ui.view, shown, "").len();
-    render::search_prompt(&ui.search, ui.searching, matches, styled)
+    Ok(program)
 }
 
-/// Render the "My Shipments" section: my commit counts for the next
-/// (unreleased) version and the last few stable releases, one labelled row
-/// each with the labels right-aligned so the colons and counts line up. Each
+fn run_once_session(
+    program: &mut Program<Stdin, Stdout>,
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+) -> Result<Option<Sections>> {
+    // Inline loading frame; raw mode swallows keystrokes so nothing echoes into
+    // the output while we wait.
+    paint_loading(program.screen_mut())?;
+
+    // Fetch off-thread so `q` stays live during network I/O. `me` and the
+    // default branch are resolved here too, so even the first round-trip never
+    // blocks the abort key.
+    let (cli2, client2, repo2) = (cli.clone(), client.clone(), repo.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let fetched = (|| {
+            let me = client2.me()?;
+            let default_branch = client2
+                .default_branch(&repo2)
+                .unwrap_or_else(|_| "main".to_string());
+            // Only the selected view: `--once` output has no Tab to switch.
+            fetch(
+                &cli2,
+                &client2,
+                &repo2,
+                &me,
+                &default_branch,
+                cli2.view == View::Mine,
+                cli2.view == View::Reviews,
+            )
+        })();
+        let _ = tx.send(fetched); // ignored if we already aborted (rx dropped)
+    });
+
+    // `None` => the user aborted; `Some(result)` => the fetch finished.
+    let fetched = loop {
+        if termination_requested() {
+            break None;
+        }
+        match rx.try_recv() {
+            Ok(result) => break Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                break Some(Err(anyhow::anyhow!("fetch worker stopped unexpectedly")));
+            }
+        }
+        if program.poll_event(Some(INPUT_POLL_INTERVAL))? {
+            let mut aborted = false;
+            // Reading observes the event, so capability replies (synchronized
+            // output) are tracked as they pass through.
+            while let Some(ev) = program.try_read_event()? {
+                if let Action::Quit = classify(&ev) {
+                    aborted = true;
+                }
+            }
+            if aborted {
+                break None;
+            }
+        }
+    };
+
+    match fetched {
+        Some(Ok(sections)) => {
+            // Replace the loading frame with the dashboard, then leave it inline.
+            let ascii = ascii_mode(cli.ascii, program.screen().color_profile());
+            render_dashboard(
+                program.screen_mut(),
+                &sections,
+                &Ui::once(cli),
+                &Changes::default(),
+                "",
+                None,
+                ascii,
+                false,
+            )?;
+            Ok(Some(sections))
+        }
+        Some(Err(error)) => Err(error),
+        None => {
+            // Aborted: wipe the loading frame so nothing is left behind.
+            program.screen_mut().clear();
+            program.screen_mut().render()?;
+            Ok(None)
+        }
+    }
+}
+
+fn run_once_interactive(
+    terminal: Terminal<Stdin, Stdout>,
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+) -> Result<()> {
+    let mut program = start_program(terminal)?;
+    let result = run_once_session(&mut program, cli, client, repo);
+    let finish = program.finish();
+    let sections = match result {
+        Ok(sections) => {
+            finish?;
+            sections
+        }
+        Err(error) => {
+            let _ = finish;
+            return Err(error);
+        }
+    };
+    if let Some(sections) = sections
+        && !cli.no_cache
+    {
+        cache::save(repo, &sections);
+    }
+    Ok(())
+}
+
+/// Paint the "My Shipments" section onto `s` at row `top`: my commit counts for
+/// the next (unreleased) version and the last few stable releases, one labelled
+/// row each with the labels right-aligned so the colons and counts line up. Each
 /// label links out — the upcoming one to the compare log, each release to its
 /// release page — and shipped releases also show how long ago they were
-/// published, aligned into a trailing column.
-fn render_commits(
-    f: &mut String,
+/// published, aligned into a trailing column. Returns the next row and the row
+/// the selection caret was painted on, if any.
+fn paint_commits(
+    s: &mut impl TextSurface,
     stats: &commits::CommitStats,
     selected: Option<usize>,
-    styled: bool,
-) {
+    ascii: bool,
+    top: u16,
+) -> (u16, Option<u16>) {
     if !stats.available {
         // The shipments rows lead with a 2-column gutter, not a table's marker
         // and glyph cells, so the placeholder follows that instead.
-        f.push_str(&render::placeholder("Commit stats unavailable.", 2, styled));
-        f.push('\n');
-        return;
+        return (
+            render::paint_dim_at(s, "Commit stats unavailable.", 2, top),
+            None,
+        );
     }
     let count = |c: &commits::Count| format!("{}{}", c.mine, if c.capped { "+" } else { "" });
 
@@ -690,14 +875,15 @@ fn render_commits(
             (n + c.mine, capped || c.capped)
         });
     let total = format!("{total}{}", if capped { "+" } else { "" });
-    f.push_str(&render::header(
+    let mut y = render::paint_header(
+        s,
         "My Shipments",
         status::BLUE,
         Some(&total),
         None,
-        styled,
-    ));
-    f.push('\n');
+        ascii,
+        top,
+    );
 
     // Each row: the upcoming (unreleased) version first (no publish age), then
     // the shipped releases newest-first with their relative publish age. A row
@@ -713,74 +899,60 @@ fn render_commits(
         None,
     )];
     for r in &stats.releases {
-        let age = r.published_at.as_deref().map(|p| timefmt::age_of(Some(p)));
         rows.push((
             r.tag.clone(),
             Some(r.bucket.url.clone()),
             value(Some(&r.bucket)),
-            age,
+            r.published_at.as_deref().map(|p| timefmt::age_of(Some(p))),
         ));
     }
 
-    // Right-align the labels and pad the counts to shared widths, so the
-    // colons, counts, and publish ages each line up in a readable column.
-    let label_w = rows.iter().map(|(l, ..)| l.width()).max().unwrap_or(0);
-    let value_w = rows.iter().map(|(.., v, _)| v.width()).max().unwrap_or(0);
+    // Right-align the labels and pad the counts to shared widths, so the colons,
+    // counts, and publish ages each line up in a readable column.
+    let label_w = rows
+        .iter()
+        .map(|(l, ..)| s.str_width(l) as usize)
+        .max()
+        .unwrap_or(0);
+    let value_w = rows
+        .iter()
+        .map(|(.., v, _)| s.str_width(v) as usize)
+        .max()
+        .unwrap_or(0);
 
     // The selection index counts only navigable (URL-bearing) rows; the sole
     // url-less row is a commit-less "upcoming", which then shifts the rendered
     // caret row down by one.
     let sel_row = selected.map(|k| if stats.upcoming.is_some() { k } else { k + 1 });
 
+    let mut caret = None;
     for (i, (label, url, value, age)) in rows.iter().enumerate() {
         // The first row is the upcoming (unreleased) version; set it apart in
         // italics. The label links to the bucket's log/release page.
-        let style = if i == 0 {
-            anstyle::Style::new().italic()
+        let style = if i == 0 && !ascii {
+            Style::new().italic()
         } else {
-            anstyle::Style::new()
+            Style::new()
         };
         let cell = match url {
             Some(url) => render::Cell::link_styled(label.clone(), url.clone(), style),
             None => render::Cell::styled(label.clone(), style),
         };
-        // A 2-column leading gutter, backgrounded on the selected row (the mark
-        // `highlight_selected` extends across the line) and blank otherwise, so
-        // the labels line up either way.
-        let gutter = if Some(i) == sel_row {
-            let cell = render::Cell::styled("  ", render::select_style());
-            render::render_cell(&cell, styled)
-        } else {
-            "  ".to_string()
-        };
-        let lpad = " ".repeat(label_w - label.width());
-        f.push_str(&format!(
-            "{gutter}{lpad}{}: {value}",
-            render::render_cell(&cell, styled)
-        ));
-        if let Some(age) = age {
-            let vpad = " ".repeat(value_w - value.width() + 3);
-            let age_cell = render::Cell::styled(age.clone(), anstyle::Style::new().dimmed());
-            f.push_str(&vpad);
-            f.push_str(&render::render_cell(&age_cell, styled));
+        // A 2-column leading gutter keeps the labels aligned; the selected row
+        // is reported here and highlighted by `paint_body` once the body is done.
+        if Some(i) == sel_row {
+            caret = Some(y);
         }
-        f.push('\n');
+        let x = (2 + label_w - s.str_width(label) as usize) as u16;
+        let p = s.set_str((x, y), &cell.text, &cell.style);
+        let p = s.set_str((p.x, y), &format!(": {value}"), None);
+        if let Some(age) = age {
+            let x = p.x + (value_w - s.str_width(value) as usize + 3) as u16;
+            s.set_str((x, y), age, Style::new().faint());
+        }
+        y += 1;
     }
-}
-
-/// A dim trailing line reporting a transient error (last good data is kept).
-fn error_trailing(msg: &str, styled: bool) -> String {
-    let mut s = render::empty_line(&format!("error: {msg}"), styled);
-    s.push('\n');
-    s
-}
-
-/// A dim trailing line confirming a transient action (a clipboard copy), shown
-/// in the same slot as the error line and cleared by the next refresh.
-fn note_trailing(msg: &str, styled: bool) -> String {
-    let mut s = render::empty_line(msg, styled);
-    s.push('\n');
-    s
+    (y, caret)
 }
 
 /// First line of an error, truncated, for the one-line error status.
@@ -794,48 +966,206 @@ fn short_error(e: &anyhow::Error) -> String {
     }
 }
 
-/// Restores the terminal when dropped (normal return or a `?` error): the
-/// cursor comes back, autowrap is re-enabled, and we leave the alternate screen
-/// — handing back the shell's scrollback exactly as we found it. A matching
-/// signal handler covers SIGINT/SIGTERM/SIGHUP, which skip destructors.
-struct ScreenGuard;
+/// What a keypress or resize means to the watch loop in normal (non-search) mode.
+enum Action {
+    /// Ignore (an unbound key, or a non-input event).
+    None,
+    /// `q`/`Ctrl-C`: quit.
+    Quit,
+    /// `r`/`R`: refresh now.
+    Refresh,
+    /// `?`: toggle the help legend.
+    ToggleHelp,
+    /// `Tab`: switch to the other view.
+    SwitchView,
+    /// `Enter`: open the selected row in the browser.
+    Open,
+    /// `y`: copy the selected row's link.
+    Copy,
+    /// `Y`: copy every link in the section the cursor is in.
+    CopySection,
+    /// `/`: open the search prompt.
+    Search,
+    /// `Esc`: clear an applied filter, or quit when there is none.
+    Cancel,
+    /// A movement key: move the selection cursor.
+    Move(nav::Move),
+    /// `Ctrl-Z`: suspend to the shell, then resume.
+    Suspend,
+    /// The terminal was resized to these cell dimensions.
+    Resize(u16, u16),
+}
 
-impl Drop for ScreenGuard {
-    fn drop(&mut self) {
-        print!("{}", render::LEAVE_SCREEN);
-        let _ = std::io::stdout().flush();
+/// A keystroke while the search prompt is open (raw text input, unlike the
+/// semantic [`Action`]s of normal mode).
+#[derive(Debug, PartialEq, Eq)]
+enum SearchAction {
+    /// Ignore (an unbound key, or a non-input event).
+    None,
+    /// A printable character to append to the query.
+    Char(char),
+    /// Backspace: drop the last query character.
+    Backspace,
+    /// Enter: apply the filter and leave the prompt.
+    Enter,
+    /// Esc: clear the filter and leave the prompt.
+    Esc,
+    /// `Ctrl-C`: quit, including while the prompt is open.
+    Quit,
+    /// `Ctrl-Z`: suspend to the shell, then resume.
+    Suspend,
+    /// The terminal was resized to these cell dimensions.
+    Resize(u16, u16),
+}
+
+/// Classify an event into a normal-mode [`Action`]. In raw mode the signal keys
+/// arrive as ordinary key events, so `ctrl+c`/`ctrl+z` are matched here rather
+/// than through signal handlers. `Key::matches` is case-sensitive, so the
+/// case-insensitive bindings list both forms.
+fn classify(ev: &Event) -> Action {
+    match ev {
+        Event::KeyPress(k) => {
+            if k.matches_any(["q", "Q", "ctrl+c"]) {
+                Action::Quit
+            } else if k.matches("esc") {
+                Action::Cancel
+            } else if k.matches_any(["r", "R"]) {
+                Action::Refresh
+            } else if k.matches("?") {
+                Action::ToggleHelp
+            } else if k.matches("tab") {
+                Action::SwitchView
+            } else if k.matches("enter") {
+                Action::Open
+            } else if k.matches("y") {
+                Action::Copy
+            } else if k.matches("Y") {
+                Action::CopySection
+            } else if k.matches("/") {
+                Action::Search
+            } else if k.matches("ctrl+z") {
+                Action::Suspend
+            } else if k.matches_any(["j", "down"]) {
+                Action::Move(nav::Move::Down)
+            } else if k.matches_any(["k", "up"]) {
+                Action::Move(nav::Move::Up)
+            } else if k.matches("g") {
+                Action::Move(nav::Move::Top)
+            } else if k.matches("G") {
+                Action::Move(nav::Move::Bottom)
+            } else if k.matches("ctrl+d") {
+                Action::Move(nav::Move::HalfDown)
+            } else if k.matches("ctrl+u") {
+                Action::Move(nav::Move::HalfUp)
+            } else {
+                Action::None
+            }
+        }
+        Event::Resize(ws) => Action::Resize(ws.col, ws.row),
+        _ => Action::None,
     }
 }
 
-/// Paint `body` with `bottom` beneath it, flushing stdout. Only ever called
-/// while watching, where the dashboard owns the alternate screen and knows how
-/// tall it is, so the frame is pinned: `bottom` (help, search prompt, error
-/// line, footer) sits on the last rows and the body scrolls under it, following
-/// the selection caret. If the height can't be read after all, it degrades to a
-/// plain clear-and-print.
-fn repaint(body: &str, bottom: &str) -> std::io::Result<()> {
-    match term::height() {
-        Some(rows) => print!(
-            "{}{}",
-            render::HOME,
-            render::frame(body, bottom, rows as usize, render::caret_line(body))
-        ),
-        None => print!("{}{body}{bottom}", render::clear()),
+/// Classify an event while the search prompt is open: printable characters
+/// extend the query, everything else is an edit/exit key. `q` remains a
+/// searchable character, while `Ctrl-C` quits and Esc closes the prompt.
+fn classify_search(ev: &Event) -> SearchAction {
+    match ev {
+        Event::KeyPress(k) => {
+            if k.matches("ctrl+c") {
+                SearchAction::Quit
+            } else {
+                match k.code {
+                    KeyCode::Char(c)
+                        if !k
+                            .modifiers
+                            .intersects(KeyModifiers::CTRL | KeyModifiers::ALT) =>
+                    {
+                        SearchAction::Char(c)
+                    }
+                    KeyCode::Space => SearchAction::Char(' '),
+                    KeyCode::Backspace => SearchAction::Backspace,
+                    KeyCode::Enter => SearchAction::Enter,
+                    KeyCode::Escape => SearchAction::Esc,
+                    _ if k.matches("ctrl+z") => SearchAction::Suspend,
+                    _ => SearchAction::None,
+                }
+            }
+        }
+        Event::Resize(ws) => SearchAction::Resize(ws.col, ws.row),
+        _ => SearchAction::None,
     }
-    std::io::stdout().flush()
+}
+
+/// What the watch loop should do after handling a batch of input.
+enum Flow {
+    /// Keep waiting / keep fetching.
+    Continue,
+    /// `r` was pressed: refresh now.
+    Refresh,
+    /// A quit key was pressed: leave the loop (the caller tears the screen down).
+    Quit,
+}
+
+/// The interactive dashboard state threaded through painting and mutated on each
+/// keypress. One-shot output uses the inert [`Ui::once`] form. Public only so the
+/// `demo` example (which renders fake data for the README screenshot) can build
+/// one.
+pub struct Ui {
+    /// Active view; starts at `--view`, toggled with Tab.
+    pub view: View,
+    /// Whether the `?` help legend is shown (starts hidden while watching).
+    pub show_help: bool,
+    /// Navigation cursor into the active view's (filtered) rows — lazy (`None`
+    /// until the user moves it), reset when switching views or changing the
+    /// search, clamped when a refresh shrinks the list.
+    pub selected: Option<usize>,
+    /// The active search query; empty means no filter is applied.
+    pub search: String,
+    /// Whether the search prompt is open and capturing text.
+    pub searching: bool,
+    /// `--branch`: show each open PR's head branch.
+    pub branch: bool,
+}
+
+impl Ui {
+    /// The non-interactive form used by `--once` / piped output: the `--view`
+    /// sections, the help legend per `--no-help`, no selection and no search.
+    pub fn once(cli: &Cli) -> Ui {
+        Ui {
+            view: cli.view,
+            show_help: !cli.no_help,
+            selected: None,
+            search: String::new(),
+            searching: false,
+            branch: cli.branch,
+        }
+    }
+
+    /// The sections to paint: `good` filtered by the active search, or `good`
+    /// itself when there's no query. `buf` owns the filtered copy if one is made,
+    /// so the returned reference stays valid for the caller.
+    fn shown<'a>(&self, good: &'a Sections, buf: &'a mut Option<Sections>) -> &'a Sections {
+        if self.search.is_empty() {
+            good
+        } else {
+            buf.insert(nav::filter(good, &self.search))
+        }
+    }
 }
 
 /// Entry point: authenticate, resolve repo + user, then render once or watch.
-#[allow(clippy::too_many_lines)] // top-level orchestration reads better in one place
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-    // Auth can drive the interactive device flow whenever there's a terminal,
-    // but rendering is plain under `--once` (single-shot/scriptable output).
-    let interactive = std::io::stdout().is_terminal();
-    let styled = interactive && !cli.once;
+    // Detect interactivity through uncurses' `Terminal` (is the output half a
+    // TTY?) and reuse the very same handle to build the watch `Screen` or to
+    // encode the one-shot frame. Auth can drive the interactive device flow
+    // whenever there's a terminal.
+    let terminal = Terminal::stdio();
+    let interactive = terminal.is_terminal().1;
 
     // Authenticate first (this may run the interactive device flow and print
-    // prompts, so it must happen before we hide the cursor / clear the screen).
+    // prompts, so it must happen before we enter the alternate screen).
     let token = auth::token(cli.login, interactive)?;
     let client = Client::new(token);
 
@@ -850,101 +1180,15 @@ pub fn run() -> Result<()> {
         None => github::detect_repo()?,
     };
 
-    // `styled` already implies `!cli.once`, so watch mode is just `styled`.
-    let watch = styled;
-
-    // The refresh interval is constant, so both key-hint footers that carry it
-    // are built once: `footer` (`r refresh (every 5m) - tab switch view - ?
-    // help`) for the idle dashboard, and `footer_refreshing` (`r refreshing -
-    // …`) shown while a fetch is in flight — when `r` is inert.
-    let interval = timefmt::eta(cli.interval.dur);
-    let footer = render::footer(&interval, false, styled);
-    let footer_refreshing = render::footer(&interval, true, styled);
-
-    // Build a frame from already-fetched data (no new fetch): the active view of
-    // `good` plus the current `ui` (help/status/selection) and the given footer
-    // (the `refreshing` variant while a fetch is in flight, else the idle one).
-    // Returns the body and the bottom block separately, so the paint can pin the
-    // latter to the last rows of the screen. Used for the cached-start paint and
-    // every key repaint while idling or mid-refresh, so those stay in lockstep.
-    let idle_frame = |good: &Sections, ui: &Ui, footer: &str| {
-        let mut buf = None;
-        let shown = shown(good, ui, &mut buf);
-        (
-            render_body(
-                shown,
-                &cli,
-                ui.view,
-                &Changes::default(),
-                styled,
-                ui.selected,
-            ),
-            bottom(
-                &search_line(ui, shown, styled),
-                &ui.last_status,
-                footer,
-                &help_block(&cli, ui.view, ui.show_help, styled),
-            ),
-        )
-    };
-
-    // Change-detection / last-good state, seeded from the cache below so the
-    // first refresh can highlight what changed while prowl wasn't running.
-    let mut prev: Option<Tracker> = None;
-    let mut last_good: Option<Sections> = None;
-    // The interactive dashboard state: active view (from `--view`), help hidden,
-    // no selection, no error line.
-    let mut ui = Ui {
-        view: cli.view,
-        show_help: false,
-        selected: None,
-        last_status: String::new(),
-        search: String::new(),
-        searching: false,
-    };
-
-    // In watch mode, take over the terminal for the whole session — the
-    // alternate screen, no autowrap, no cursor — and quiet stdin (no echo / no
-    // line buffering, but signal keys still work), restoring both on every exit
-    // path: the guards for normal/`?` returns, the signal handler for
-    // SIGINT/SIGTERM/SIGHUP (which skip destructors). Then paint instantly from
-    // the cache if we have it — otherwise a loading screen — while the first
-    // live fetch runs.
-    let (_screen, _input) = if watch {
-        print!("{}", render::ENTER_SCREEN);
-        let input = term::quiet();
-        let _ = ctrlc::set_handler(|| {
-            term::restore();
-            print!("{}", render::LEAVE_SCREEN);
-            let _ = std::io::stdout().flush();
-            std::process::exit(130);
-        });
-        if let Some(c) = (!cli.no_cache).then(|| cache::load(&repo)).flatten() {
-            let (body, bot) = idle_frame(&c.sections, &ui, &footer);
-            repaint(&body, &bot)?;
-            prev = Some(Tracker::build(
-                c.sections.prs.as_deref(),
-                c.sections.merged.as_deref(),
-            ));
-            last_good = Some(c.sections);
-        } else {
-            repaint(&render::loading(styled), "")?;
-        }
-        (Some(ScreenGuard), input)
-    } else {
-        (None, None)
-    };
-
-    let me = client.me()?;
-    // The default branch is the head of the "next release" commit range.
-    // Resolved once; falls back to `main` if it can't be determined.
-    let default_branch = client
-        .default_branch(&repo)
-        .unwrap_or_else(|_| "main".to_string());
-
-    // Single render: --once, or whenever stdout is not a TTY. Only the selected
-    // view's sections are fetched (you can't Tab in one-shot output).
-    if cli.once || !styled {
+    // Non-interactive (piped, redirected, not a TTY): a blocking fetch, encode
+    // the frame to stdout, and exit. No screen, no loading UI.
+    if !interactive {
+        let me = client.me()?;
+        let default_branch = client
+            .default_branch(&repo)
+            .unwrap_or_else(|_| "main".to_string());
+        // Only the selected view's sections are fetched (you can't Tab in
+        // one-shot output).
         let sections = fetch(
             &cli,
             &client,
@@ -957,155 +1201,649 @@ pub fn run() -> Result<()> {
         if !cli.no_cache {
             cache::save(&repo, &sections);
         }
-        let body = render_body(&sections, &cli, cli.view, &Changes::default(), styled, None);
-        let bottom = bottom(
-            "",
-            "",
-            "",
-            &help_block(&cli, cli.view, !cli.no_help, styled),
-        );
-        print!("{body}{bottom}");
-        std::io::stdout().flush()?;
-        return Ok(());
+        return render_once(&terminal, &sections, &cli, &Changes::default(), None);
     }
 
-    // Watch loop. Each tick clears the screen and re-renders; the bell rings
-    // once when a PR of mine merges or an open PR's status changes, and those
-    // rows are flagged on the redraw. A failed fetch keeps the last good data,
-    // shows a dim error line, and does not ring. `armed` keeps the first
-    // refresh after a cached start from ringing (it still highlights changes).
-    let mut armed = false;
-    loop {
-        // Repaint the last-good dashboard with the `r refreshing` footer (the
-        // `r` glyph dimmed): once as the fetch starts, then on every key while it
-        // runs. A no-op until there's data to show. `ui` is passed in (not
-        // captured) so `on_key` can still mutate it below.
-        let paint_refreshing = |ui: &Ui| {
-            if let Some(good) = &last_good {
-                let (body, bot) = idle_frame(good, ui, &footer_refreshing);
-                let _ = repaint(&body, &bot);
-            }
+    ctrlc::set_handler(|| TERMINATION_REQUESTED.store(true, Ordering::Release))
+        .context("installing termination handler")?;
+    let result = if cli.once {
+        // An inline screen swallows input while the fetch runs, then leaves the
+        // dashboard in the terminal.
+        run_once_interactive(terminal, &cli, &client, &repo)
+    } else {
+        // `stop` always runs, so `Program::finish` restores the terminal after
+        // a clean quit or an error from the event loop.
+        let mut app = App::start(terminal, &cli, &client, &repo)?;
+        let result = app.run();
+        app.stop()?;
+        result
+    };
+    if termination_requested() {
+        std::process::exit(130);
+    }
+    result
+}
+
+/// The interactive watch, following the uncurses example `App` pattern: it owns
+/// the `Screen` and all dashboard state. `start` brings the terminal up, `run`
+/// drives the refresh + event loop (returning `Ok(())` when a quit key is
+/// pressed), and `stop` tears it back down with `Screen::finish`. The caller
+/// always calls `stop`, so the terminal is restored on every path.
+struct App<'a> {
+    program: Program<Stdin, Stdout>,
+    cli: &'a Cli,
+    client: &'a Client,
+    repo: &'a Repo,
+    me: String,
+    default_branch: String,
+    /// The constant next-refresh ETA shown in the key-hint footer.
+    eta: String,
+    /// Change-detection baseline and the last successfully fetched sections.
+    prev: Option<Tracker>,
+    last_good: Option<Sections>,
+    /// The interactive dashboard state: view, help visibility, selection, search.
+    ui: Ui,
+    /// The most recent short error (empty unless a refresh or an open failed),
+    /// kept so a `?` toggle or a repaint keeps it on screen.
+    /// The dim trailing line above the footer: a refresh/open error, or a
+    /// transient note (a clipboard copy). Worded in full, and cleared by the
+    /// next refresh.
+    last_status: String,
+    /// Whether a fetch is in flight, so the footer can say `r refreshing`.
+    refreshing: bool,
+    /// Whether the bell is armed. The first refresh after a cached start is
+    /// silent (it still highlights changes).
+    armed: bool,
+    /// Whether we've switched from the inline loading frame to the alternate
+    /// screen. The watch starts inline and enters the alt screen once the first
+    /// fetch lands (or immediately when there's a cache to paint).
+    in_alt: bool,
+    /// Whether the terminal cursor is currently shown. `show_cursor`/
+    /// `hide_cursor` always emit, so track the state and only toggle on a
+    /// change — the cursor is shown solely while the search prompt captures.
+    cursor_shown: bool,
+}
+
+impl<'a> App<'a> {
+    /// Bring the terminal up (raw mode, hidden cursor) from the supplied
+    /// `Terminal` — the screen keeps the terminal's detected color profile. The
+    /// loading frame shows **inline**; the alt screen is entered once the first
+    /// fetch lands (or immediately when there's a cache to paint), so loading
+    /// looks like ordinary command output before the dashboard takes over.
+    fn start(
+        terminal: Terminal<Stdin, Stdout>,
+        cli: &'a Cli,
+        client: &'a Client,
+        repo: &'a Repo,
+    ) -> Result<Self> {
+        let program = start_program(terminal)?;
+
+        let mut app = App {
+            eta: timefmt::eta(cli.interval.dur),
+            program,
+            cli,
+            client,
+            repo,
+            me: String::new(),
+            default_branch: String::new(),
+            prev: None,
+            last_good: None,
+            ui: Ui {
+                view: cli.view,
+                show_help: false,
+                selected: None,
+                search: String::new(),
+                searching: false,
+                branch: cli.branch,
+            },
+            last_status: String::new(),
+            refreshing: false,
+            armed: false,
+            in_alt: false,
+            cursor_shown: false,
         };
-        paint_refreshing(&ui);
-        // Run the blocking fetch on a worker thread and poll input while it
-        // runs, so navigation, `?` (help) and Tab (switch view) stay responsive
-        // mid-refresh. Both views are fetched every refresh so Tab can switch
-        // instantly. A refresh is already in flight, so `Act::Refresh` (a tick
-        // or `r`) is ignored; only a state change repaints (keeping the `r
-        // refreshing` footer).
-        let result = std::thread::scope(|scope| {
-            let handle =
-                scope.spawn(|| fetch(&cli, &client, &repo, &me, &default_branch, true, true));
-            while !handle.is_finished() {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(60);
-                if let Act::Repaint = poll(&mut ui, deadline, last_good.as_ref(), styled) {
-                    paint_refreshing(&ui);
-                }
-            }
-            handle.join().expect("fetch thread panicked")
-        });
-        match result {
-            Ok(sections) => {
-                let tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
-                let changes = prev.as_ref().map(|p| tracker.diff(p)).unwrap_or_default();
-                let bell = changes.any();
 
-                ui.last_status = String::new();
-                // The refreshed (and filtered) list may be shorter than before;
-                // keep the cursor in range (or drop it if it emptied).
-                ui.selected = nav::clamp(
-                    ui.selected,
-                    nav::targets(ui.view, &sections, &ui.search).len(),
-                );
-                let mut buf = None;
-                let shown = shown(&sections, &ui, &mut buf);
-                let body = render_body(shown, &cli, ui.view, &changes, styled, ui.selected);
-                let bot = bottom(
-                    &search_line(&ui, shown, styled),
-                    "",
-                    &footer,
-                    &help_block(&cli, ui.view, ui.show_help, styled),
-                );
-                repaint(&body, &bot)?;
-
-                if armed && bell && !cli.no_bell {
-                    render::ring_bell();
-                }
-                armed = true;
-                if !cli.no_cache {
-                    cache::save(&repo, &sections);
-                }
-                prev = Some(tracker);
-                last_good = Some(sections);
-            }
-            Err(e) => {
-                ui.last_status = error_trailing(&short_error(&e), styled);
-                let (body, search, help) = match &last_good {
-                    Some(good) => {
-                        let mut buf = None;
-                        let shown = shown(good, &ui, &mut buf);
-                        (
-                            render_body(
-                                shown,
-                                &cli,
-                                ui.view,
-                                &Changes::default(),
-                                styled,
-                                ui.selected,
-                            ),
-                            search_line(&ui, shown, styled),
-                            help_block(&cli, ui.view, ui.show_help, styled),
-                        )
-                    }
-                    None => (String::new(), String::new(), String::new()),
-                };
-                let bot = bottom(&search, &ui.last_status, &footer, &help);
-                repaint(&body, &bot)?;
-            }
+        // If the very first paint fails, restore the terminal before bailing
+        // (`stop` handles both the inline and alt-screen states).
+        if let Err(e) = app.paint_startup() {
+            let _ = app.stop();
+            return Err(e);
         }
-        // Wait for the interval, but let the user act now: `r` forces a refresh,
-        // the movement keys drive the selection cursor, Enter opens it, `/`
-        // searches, `?` toggles help, Tab switches view; all in place.
-        let deadline = std::time::Instant::now() + cli.interval.dur;
+        Ok(app)
+    }
+
+    /// The initial cache/loading paint, seeding change-detection from the cache
+    /// so the first live refresh highlights what changed while prowl was away.
+    fn paint_startup(&mut self) -> Result<()> {
+        match (!self.cli.no_cache)
+            .then(|| cache::load(self.repo))
+            .flatten()
+        {
+            Some(c) => {
+                self.prev = Some(Tracker::build(
+                    c.sections.prs.as_deref(),
+                    c.sections.merged.as_deref(),
+                ));
+                self.last_good = Some(c.sections);
+                // Cached data is real content, so go straight to the alt screen.
+                self.enter_alt()?;
+                self.redraw(&Changes::default())?;
+            }
+            None => paint_loading(self.program.screen_mut())?,
+        }
+        Ok(())
+    }
+
+    /// Switch from the inline loading frame to the alternate screen, once. The
+    /// inline frame is dropped to zero rows and flushed first, so taking over the
+    /// screen leaves the terminal as it was before prowl ran.
+    fn enter_alt(&mut self) -> Result<()> {
+        if !self.in_alt {
+            let w = self.program.screen().width().max(1);
+            self.program.screen_mut().resize((w, 0));
+            self.program.screen_mut().render()?;
+            self.program.enter_alt_screen()?;
+            // The one place `autoresize` is the right tool: we now own the
+            // whole window, and it is the only call that queries the terminal
+            // for its row count — which we need, having just collapsed the
+            // managed area to zero rows. Resize events carry their own size.
+            self.program.autoresize()?;
+            self.in_alt = true;
+        }
+        Ok(())
+    }
+
+    /// Paint the current dashboard via [`render_dashboard`], drawing the last
+    /// good sections (or an empty frame, so a first-fetch error still shows its
+    /// error line + footer) with `changes` highlighted.
+    fn redraw(&mut self, changes: &Changes) -> Result<()> {
+        let good = self.last_good.as_ref().unwrap_or(&Sections::EMPTY);
+        let mut buf = None;
+        let sections = self.ui.shown(good, &mut buf);
+        let ascii = ascii_mode(self.cli.ascii, self.program.screen().color_profile());
+        let caret = render_dashboard(
+            self.program.screen_mut(),
+            sections,
+            &self.ui,
+            changes,
+            &self.last_status,
+            Some((self.eta.as_str(), self.refreshing)),
+            ascii,
+            // Pinning lays the frame out for a screen of a known height, which
+            // is only true once we own the alternate screen.
+            self.in_alt,
+        )?;
+        // Reveal the cursor only once it's parked in the prompt, so it never
+        // blinks at a stale cell.
+        let want = caret.is_some();
+        if want != self.cursor_shown {
+            if want {
+                self.program.show_cursor()?;
+            } else {
+                self.program.hide_cursor()?;
+            }
+            self.cursor_shown = want;
+        }
+        Ok(())
+    }
+
+    /// Drive the watch: loop fetch → paint → wait, returning `Ok(())` when the
+    /// user presses a quit key.
+    fn run(&mut self) -> Result<()> {
         loop {
-            match poll(&mut ui, deadline, last_good.as_ref(), styled) {
-                Act::Refresh => break,
-                Act::Repaint => {
-                    if let Some(good) = &last_good {
-                        let (body, bot) = idle_frame(good, &ui, &footer);
-                        repaint(&body, &bot)?;
-                    }
-                }
-                Act::Idle => {}
+            if termination_requested() {
+                return Ok(());
+            }
+            if let Flow::Quit = self.fetch_responsive()? {
+                return Ok(());
+            }
+            if let Flow::Quit = self.wait_interval()? {
+                return Ok(());
             }
         }
+    }
+
+    /// Tear the terminal back down. The consuming `Screen::finish` is the
+    /// idiomatic teardown: it exits the alternate screen, shows the cursor, and
+    /// leaves raw mode.
+    fn stop(self) -> Result<()> {
+        self.program.finish()?;
+        Ok(())
+    }
+
+    /// Fetch on a detached background thread while the main thread keeps polling
+    /// input, so quit/`?`/resize stay live and no network I/O ever blocks the UI.
+    /// The result arrives over a channel; pressing quit returns immediately and
+    /// abandons the in-flight request (the thread is reaped at process exit).
+    /// `me` and the default branch are resolved here too (once), so even the
+    /// first round-trip never freezes input. `r` is ignored — a fetch is already
+    /// in flight.
+    fn fetch_responsive(&mut self) -> Result<Flow> {
+        // The footer says `r refreshing` (with `r` dimmed) for the duration.
+        self.refreshing = true;
+        self.repaint_last()?;
+        let flow = self.fetch_loop();
+        self.refreshing = false;
+        flow
+    }
+
+    /// The fetch + input-poll loop itself; [`Self::fetch_responsive`] wraps it to
+    /// keep the `refreshing` footer state balanced on every exit path.
+    fn fetch_loop(&mut self) -> Result<Flow> {
+        let (cli, client, repo) = (self.cli.clone(), self.client.clone(), self.repo.clone());
+        let mut me = self.me.clone();
+        let mut default_branch = self.default_branch.clone();
+        let resolve = me.is_empty();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let fetched = (|| {
+                if resolve {
+                    me = client.me()?;
+                    default_branch = client
+                        .default_branch(&repo)
+                        .unwrap_or_else(|_| "main".to_string());
+                }
+                // Both views every refresh, so Tab switches instantly.
+                let sections = fetch(&cli, &client, &repo, &me, &default_branch, true, true)?;
+                Ok((me, default_branch, sections))
+            })();
+            let _ = tx.send(fetched); // ignored if we already quit (rx dropped)
+        });
+
+        loop {
+            if termination_requested() {
+                return Ok(Flow::Quit);
+            }
+            match rx.try_recv() {
+                Ok(Ok((me, default_branch, sections))) => {
+                    self.me = me;
+                    self.default_branch = default_branch;
+                    // Cleared before painting, so the result frame already shows
+                    // the plain `r refresh` hint again.
+                    self.refreshing = false;
+                    self.apply(sections)?;
+                    return Ok(Flow::Continue);
+                }
+                Ok(Err(e)) => {
+                    self.refreshing = false;
+                    self.show_error(e)?;
+                    return Ok(Flow::Continue);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(Flow::Continue),
+            }
+            if self.program.poll_event(Some(INPUT_POLL_INTERVAL))? {
+                while let Some(ev) = self.program.try_read_event()? {
+                    if let Flow::Quit = self.handle_event(&ev)? {
+                        return Ok(Flow::Quit);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Wait out the refresh interval, staying responsive: `r` refreshes now, `?`
+    /// toggles help, quit/suspend/resize are honored, other keys are discarded.
+    fn wait_interval(&mut self) -> Result<Flow> {
+        let deadline = Instant::now() + self.cli.interval.dur;
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            if termination_requested() {
+                return Ok(Flow::Quit);
+            }
+            if !self
+                .program
+                .poll_event(Some(remaining.min(INPUT_POLL_INTERVAL)))?
+            {
+                continue;
+            }
+            while let Some(ev) = self.program.try_read_event()? {
+                match self.handle_event(&ev)? {
+                    Flow::Quit => return Ok(Flow::Quit),
+                    Flow::Refresh => return Ok(Flow::Continue), // refresh now
+                    Flow::Continue => {}
+                }
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// Apply an input event's side effects (navigation, view switch, search,
+    /// open, suspend, help toggle, resize repaint) and report the control flow it
+    /// implies. While the search prompt is open every keystroke is text, so it is
+    /// routed to [`Self::handle_search_event`] instead.
+    fn handle_event(&mut self, ev: &Event) -> Result<Flow> {
+        if self.ui.searching {
+            return self.handle_search_event(ev);
+        }
+        Ok(match classify(ev) {
+            Action::Quit => Flow::Quit,
+            Action::Refresh => Flow::Refresh,
+            Action::Suspend => {
+                self.suspend()?;
+                Flow::Continue
+            }
+            Action::ToggleHelp => {
+                self.ui.show_help = !self.ui.show_help;
+                self.repaint_last()?;
+                Flow::Continue
+            }
+            Action::SwitchView => {
+                // Selection indices don't carry across views, so start fresh.
+                self.ui.view = self.ui.view.toggle();
+                self.ui.selected = None;
+                self.repaint_last()?;
+                Flow::Continue
+            }
+            Action::Search => {
+                self.ui.searching = true;
+                self.repaint_last()?;
+                Flow::Continue
+            }
+            Action::Cancel => {
+                // Esc clears an applied filter; with none to clear, it quits.
+                if self.ui.search.is_empty() {
+                    Flow::Quit
+                } else {
+                    self.ui.search.clear();
+                    self.ui.selected = None;
+                    self.repaint_last()?;
+                    Flow::Continue
+                }
+            }
+            Action::Open => {
+                self.open_selected()?;
+                Flow::Continue
+            }
+            Action::Copy => {
+                self.copy_selected()?;
+                Flow::Continue
+            }
+            Action::CopySection => {
+                self.copy_section()?;
+                Flow::Continue
+            }
+            Action::Move(m) => {
+                let len = self.target_count();
+                let next = nav::moved(m, self.ui.selected, len, self.half_page());
+                if next != self.ui.selected {
+                    self.ui.selected = next;
+                    self.repaint_last()?;
+                }
+                Flow::Continue
+            }
+            Action::Resize(w, h) => {
+                // The event already carries the new size, so resize to it
+                // directly rather than re-querying the terminal. Only the alt
+                // screen is the whole window: inline (the loading frame) the
+                // managed area keeps its own height and just follows the width.
+                let h = if self.in_alt {
+                    h
+                } else {
+                    self.program.screen().height()
+                };
+                self.program.screen_mut().resize((w, h));
+                self.repaint_last()?;
+                Flow::Continue
+            }
+            Action::None => Flow::Continue,
+        })
+    }
+
+    /// Apply a keystroke while the search prompt is open. Typing filters live
+    /// (resetting the cursor), Enter applies the filter and closes the prompt,
+    /// Esc clears the filter and closes it.
+    fn handle_search_event(&mut self, ev: &Event) -> Result<Flow> {
+        match classify_search(ev) {
+            SearchAction::Char(c) => {
+                self.ui.search.push(c);
+                self.ui.selected = None;
+            }
+            SearchAction::Backspace => {
+                self.ui.search.pop();
+                self.ui.selected = None;
+            }
+            SearchAction::Enter => self.ui.searching = false,
+            SearchAction::Esc => {
+                self.ui.search.clear();
+                self.ui.searching = false;
+            }
+            SearchAction::Quit => return Ok(Flow::Quit),
+            SearchAction::Suspend => return self.suspend().map(|()| Flow::Continue),
+            // The prompt only opens while watching, so we own the alt screen
+            // and the frame is the whole window.
+            SearchAction::Resize(w, h) => self.program.screen_mut().resize((w, h)),
+            SearchAction::None => return Ok(Flow::Continue),
+        }
+        self.repaint_last()?;
+        Ok(Flow::Continue)
+    }
+
+    /// Suspend to the shell (Ctrl-Z) and repaint on resume — the canvas may not
+    /// survive the stop, so don't rely on `resume`'s flush. `SIGTSTP` is Unix
+    /// job control, so elsewhere Ctrl-Z just repaints.
+    fn suspend(&mut self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            self.program.suspend()?;
+            self.program.resume()?;
+        }
+        self.repaint_last()
+    }
+
+    /// How many rows the selection cursor can visit in the active view, with the
+    /// current filter applied.
+    fn target_count(&self) -> usize {
+        self.last_good
+            .as_ref()
+            .map_or(0, |s| nav::targets(self.ui.view, s, &self.ui.search).len())
+    }
+
+    /// The half-page movement step: half the terminal window's rows.
+    fn half_page(&self) -> usize {
+        self.program
+            .window_cells()
+            .map_or(10, |s| usize::from(s.height / 2).max(1))
+    }
+
+    /// `y`: copy the selected row's link. A no-op without a selection or data.
+    fn copy_selected(&mut self) -> Result<()> {
+        let Some(sel) = self.ui.selected else {
+            return Ok(());
+        };
+        let url = self.last_good.as_ref().and_then(|good| {
+            nav::targets(self.ui.view, good, &self.ui.search)
+                .get(sel)
+                .map(|u| (*u).to_string())
+        });
+        match url {
+            Some(url) => self.copy(&url, 1),
+            None => Ok(()),
+        }
+    }
+
+    /// `Y`: copy every link of the section the cursor is in, as a markdown list.
+    /// With no selection that's the first non-empty section, matching where a
+    /// movement key would enter. Honors the active search filter, like `targets`.
+    fn copy_section(&mut self) -> Result<()> {
+        let Some(good) = &self.last_good else {
+            return Ok(());
+        };
+        let urls: Vec<String> = nav::section_at(
+            self.ui.view,
+            good,
+            &self.ui.search,
+            self.ui.selected.unwrap_or_default(),
+        )
+        .iter()
+        .map(|u| (*u).to_string())
+        .collect();
+        if urls.is_empty() {
+            return Ok(());
+        }
+        let n = urls.len();
+        let list = urls
+            .iter()
+            .map(|u| format!("- {u}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.copy(&list, n)
+    }
+
+    /// Hand `text` (`n` links) to the terminal's clipboard and report it on the
+    /// trailing status line, which the next refresh clears.
+    fn copy(&mut self, text: &str, n: usize) -> Result<()> {
+        let plural = if n == 1 { "" } else { "s" };
+        self.last_status = match clipboard::copy(text) {
+            Ok(()) => format!("copied {n} link{plural}"),
+            Err(e) => format!("error: copy failed: {e}"),
+        };
+        self.repaint_last()
+    }
+
+    /// Open the selected row's URL in the browser. A failure becomes the dim
+    /// error line; a no-op (no selection, no data) leaves the screen as is.
+    fn open_selected(&mut self) -> Result<()> {
+        let Some(sel) = self.ui.selected else {
+            return Ok(());
+        };
+        let url = self.last_good.as_ref().and_then(|good| {
+            nav::targets(self.ui.view, good, &self.ui.search)
+                .get(sel)
+                .map(|u| (*u).to_string())
+        });
+        let Some(url) = url else { return Ok(()) };
+        if let Err(e) = open::url(&url) {
+            self.last_status = format!("error: open failed: {e}");
+            self.repaint_last()?;
+        }
+        Ok(())
+    }
+
+    /// Render a successful fetch: diff against the previous snapshot, paint, ring
+    /// the bell on a change (once armed), and cache the result.
+    fn apply(&mut self, sections: Sections) -> Result<()> {
+        let tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
+        let changes = self
+            .prev
+            .as_ref()
+            .map(|p| tracker.diff(p))
+            .unwrap_or_default();
+        let bell = changes.any();
+
+        self.last_status.clear();
+        self.prev = Some(tracker);
+        self.last_good = Some(sections);
+        // The refreshed (and filtered) list may be shorter than before; keep the
+        // cursor in range (or drop it if it emptied).
+        self.ui.selected = nav::clamp(self.ui.selected, self.target_count());
+        self.enter_alt()?;
+        self.redraw(&changes)?;
+
+        if self.armed && bell && !self.cli.no_bell {
+            let _ = self.program.beep();
+        }
+        self.armed = true;
+        if !self.cli.no_cache
+            && let Some(good) = &self.last_good
+        {
+            cache::save(self.repo, good);
+        }
+        Ok(())
+    }
+
+    /// Render a failed fetch: keep the last good data, add a dim error line, and
+    /// do not ring. With no data yet, just the error line and footer show.
+    fn show_error(&mut self, e: anyhow::Error) -> Result<()> {
+        self.last_status = format!("error: {}", short_error(&e));
+        self.enter_alt()?;
+        self.redraw(&Changes::default())
+    }
+
+    /// Repaint the current frame in place (after a `?` toggle or a resize), once
+    /// there is something to show.
+    fn repaint_last(&mut self) -> Result<()> {
+        if self.last_good.is_some() {
+            self.redraw(&Changes::default())?;
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uncurses::buffer::Surface;
+    use uncurses::text::Encode;
+
+    /// Paint a dashboard onto an offscreen buffer and read it back as plain text.
+    fn body(sections: &Sections, ui: &Ui) -> String {
+        let mut canvas = TextBuffer::new(render::MAX_WIDTH as u16, 64);
+        let (used, _) = paint_dashboard(
+            &mut canvas,
+            sections,
+            ui,
+            &Changes::default(),
+            "",
+            None,
+            true,
+        );
+        canvas.resize(render::MAX_WIDTH as u16, used.max(1));
+        canvas.display_with(Profile::Disabled).to_string()
+    }
+
+    #[test]
+    fn staging_buffers_inherit_the_terminal_width_policy() {
+        use uncurses::text::WidthMode;
+
+        let screen = TextBuffer::new(1, 1)
+            .with_width_mode(WidthMode::Grapheme)
+            .with_eaw_wide(true);
+        let staged = staging_buffer(&screen, 10, 2);
+
+        assert_eq!(staged.width_mode(), WidthMode::Grapheme);
+        assert!(staged.eaw_wide());
+    }
+
+    #[test]
+    fn disabled_profiles_force_ascii_content() {
+        assert!(ascii_mode(false, Profile::Disabled));
+        assert!(ascii_mode(true, Profile::TrueColor));
+        assert!(!ascii_mode(false, Profile::TrueColor));
+    }
+
+    #[test]
+    fn ctrl_c_quits_while_search_is_open() {
+        use uncurses::event::Key;
+
+        let ctrl_c = Event::KeyPress(Key::new(KeyCode::Char('c'), KeyModifiers::CTRL));
+        let q = Event::KeyPress(Key::new(KeyCode::Char('q'), KeyModifiers::empty()));
+
+        assert_eq!(classify_search(&ctrl_c), SearchAction::Quit);
+        assert_eq!(classify_search(&q), SearchAction::Char('q'));
+    }
+
+    /// A `Ui` for the given view with nothing selected and no filter.
+    fn ui(view: View) -> Ui {
+        Ui {
+            view,
+            show_help: false,
+            selected: None,
+            search: String::new(),
+            searching: false,
+            branch: false,
+        }
+    }
 
     #[test]
     fn empty_sections_still_show_their_headers_then_a_placeholder() {
-        let cli = Cli::parse_from(["prowl"]);
         let sections = Sections {
             prs: Some(vec![]),
             queue: Some(vec![]),
-            queue_next_eta: None,
             merged: Some(vec![]),
-            commits: None,
-            reviews: None,
-            reviewed_merged: None,
+            ..Sections::EMPTY
         };
-        let body = render_body(
-            &sections,
-            &cli,
-            View::Mine,
-            &Changes::default(),
-            false,
-            None,
-        );
+        let body = body(&sections, &ui(View::Mine));
 
         // Each section header is present even though it has no rows...
         assert!(body.contains("My open PRs (0)"));
@@ -1127,54 +1865,33 @@ mod tests {
                 .lines()
                 .find(|l| l.contains(msg))
                 .expect("placeholder line");
-            assert_eq!(line, format!("{}{msg}", " ".repeat(render::ROW_INDENT)));
+            assert_eq!(
+                line,
+                format!("{}{msg}", " ".repeat(render::ROW_INDENT as usize))
+            );
         }
     }
 
     #[test]
     fn queue_header_shows_next_eta() {
-        let cli = Cli::parse_from(["prowl"]);
         let sections = Sections {
-            prs: None,
             queue: Some(vec![]),
             queue_next_eta: Some(11 * 60),
-            merged: None,
-            commits: None,
-            reviews: None,
-            reviewed_merged: None,
+            ..Sections::EMPTY
         };
-        let body = render_body(
-            &sections,
-            &cli,
-            View::Mine,
-            &Changes::default(),
-            false,
-            None,
-        );
+        let body = body(&sections, &ui(View::Mine));
         assert!(body.contains("Merge Queue (0)"));
         assert!(body.contains("~11m to merge"));
     }
 
     #[test]
     fn reviews_view_renders_its_own_sections() {
-        let cli = Cli::parse_from(["prowl"]);
         let sections = Sections {
-            prs: None,
-            queue: None,
-            queue_next_eta: None,
-            merged: None,
-            commits: None,
             reviews: Some(vec![]),
             reviewed_merged: Some(vec![]),
+            ..Sections::EMPTY
         };
-        let body = render_body(
-            &sections,
-            &cli,
-            View::Reviews,
-            &Changes::default(),
-            false,
-            None,
-        );
+        let body = body(&sections, &ui(View::Reviews));
         // The Reviews view shows its two headers (not the Mine ones).
         assert!(body.contains("Reviews (0)"));
         assert!(body.contains("Reviewed & merged (0)"));
@@ -1182,8 +1899,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_paints_the_chosen_row() {
-        let cli = Cli::parse_from(["prowl"]);
+    fn selection_highlights_the_chosen_row() {
         let pr = |n: i64| prs::PrRow {
             number: n,
             is_draft: false,
@@ -1200,47 +1916,53 @@ mod tests {
         };
         let sections = Sections {
             prs: Some(vec![pr(1), pr(2)]),
-            queue: None,
-            queue_next_eta: None,
-            merged: None,
-            commits: None,
-            reviews: None,
-            reviewed_merged: None,
+            ..Sections::EMPTY
         };
-        // No selection -> nothing is painted (the glanceable default).
-        let none = render_body(&sections, &cli, View::Mine, &Changes::default(), true, None);
-        assert_eq!(render::caret_line(&none), None);
-        // Selecting the second row paints exactly that row, whole.
-        let sel = render_body(
-            &sections,
-            &cli,
-            View::Mine,
-            &Changes::default(),
-            true,
-            Some(1),
-        );
-        let line = render::caret_line(&sel).expect("a painted row");
-        let painted = sel.lines().nth(line).unwrap();
-        assert!(painted.contains("#2"), "wrong row painted: {painted:?}");
-        assert_eq!(
-            sel.lines()
-                .filter(|l| render::caret_line(l).is_some())
-                .count(),
-            1
-        );
-    }
 
-    #[test]
-    fn bottom_puts_the_help_legend_above_the_footer() {
-        let out = bottom("search", "status", "footer", "help");
-        let at = |part: &str| out.find(part).expect("part present");
-        assert!(at("help") < at("search"));
-        assert!(at("search") < at("status"));
-        assert!(at("status") < at("footer"));
-        // Present parts are separated by a blank line, and the block ends with one
-        // newline so it can be printed straight after the body.
-        assert_eq!(out, "help\n\nsearch\n\nstatus\n\nfooter\n");
-        // Empty parts are simply omitted.
-        assert_eq!(bottom("", "", "footer", ""), "footer\n");
+        // The rows carrying the selection background, and their text.
+        let highlighted = |ui: &Ui| -> Vec<String> {
+            let w = render::MAX_WIDTH as u16;
+            let mut canvas = TextBuffer::new(w, 64);
+            paint_dashboard(
+                &mut canvas,
+                &sections,
+                ui,
+                &Changes::default(),
+                "",
+                None,
+                true,
+            );
+            let text: Vec<String> = canvas
+                .display_with(Profile::Disabled)
+                .to_string()
+                .lines()
+                .map(str::to_string)
+                .collect();
+            (0..64u16)
+                .filter(|&y| {
+                    // Edge to edge: the bar covers *every* cell of the row, so
+                    // it reads as one solid line rather than stopping at the
+                    // text — `all`, not `any`.
+                    (0..w).all(|x| {
+                        canvas
+                            .cell(uncurses::layout::Position::new(x, y))
+                            .is_some_and(|c| c.style.bg == Some(crate::status::SURFACE))
+                    })
+                })
+                .map(|y| text.get(y as usize).cloned().unwrap_or_default())
+                .collect()
+        };
+
+        // No selection -> nothing is highlighted (the glanceable default).
+        assert!(highlighted(&ui(View::Mine)).is_empty());
+
+        // Selecting the second row highlights exactly that row, whole: the bar
+        // reaches the leading marker column, which the caret used to occupy.
+        let sel = highlighted(&Ui {
+            selected: Some(1),
+            ..ui(View::Mine)
+        });
+        assert_eq!(sel.len(), 1, "expected one highlighted row, got {sel:?}");
+        assert!(sel[0].contains("#2"), "wrong row highlighted: {:?}", sel[0]);
     }
 }

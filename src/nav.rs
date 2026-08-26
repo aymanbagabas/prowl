@@ -9,7 +9,6 @@ use crate::merged::MergedRow;
 use crate::prs::PrRow;
 use crate::queue::QueueRow;
 use crate::reviews::{ReviewRow, ReviewedMergedRow};
-use crate::term::Wait;
 
 /// A row the search can match (its `haystack`) and the cursor can open (`url`).
 trait Searchable {
@@ -198,26 +197,35 @@ fn filter_commits(stats: &CommitStats, query_lower: &str) -> CommitStats {
     }
 }
 
-/// The new selection after a movement key against a `len`-row list (`half` is
-/// the half-page step). From no selection, any move enters at the top except
-/// `Bottom`, which enters at the last row. Non-movement actions leave the
-/// selection unchanged.
-pub(crate) fn moved(action: Wait, sel: Option<usize>, len: usize, half: usize) -> Option<usize> {
+/// A selection movement, decoupled from the key that produced it (the input
+/// layer maps keys to these).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Move {
+    Up,
+    Down,
+    Top,
+    Bottom,
+    HalfUp,
+    HalfDown,
+}
+
+/// The new selection after a [`Move`] against a `len`-row list (`half` is the
+/// half-page step). From no selection, any move enters at the top except
+/// `Bottom`, which enters at the last row.
+pub(crate) fn moved(action: Move, sel: Option<usize>, len: usize, half: usize) -> Option<usize> {
     if len == 0 {
         return None;
     }
     let last = len - 1;
     let step = half.max(1);
-    let new = match action {
-        Wait::Top => 0,
-        Wait::Bottom => last,
-        Wait::Up => sel.map_or(0, |i| i.saturating_sub(1)),
-        Wait::Down => sel.map_or(0, |i| (i + 1).min(last)),
-        Wait::HalfUp => sel.map_or(0, |i| i.saturating_sub(step)),
-        Wait::HalfDown => sel.map_or(0, |i| (i + step).min(last)),
-        _ => return sel,
-    };
-    Some(new)
+    Some(match action {
+        Move::Top => 0,
+        Move::Bottom => last,
+        Move::Up => sel.map_or(0, |i| i.saturating_sub(1)),
+        Move::Down => sel.map_or(0, |i| (i + 1).min(last)),
+        Move::HalfUp => sel.map_or(0, |i| i.saturating_sub(step)),
+        Move::HalfDown => sel.map_or(0, |i| (i + step).min(last)),
+    })
 }
 
 /// Clamp a selection to a (possibly shrunk) list after a refresh: drop it when
@@ -476,18 +484,17 @@ mod tests {
     #[test]
     fn movement_enters_and_clamps() {
         // From no selection, a down-ish move enters at the top; Bottom at the end.
-        assert_eq!(moved(Wait::Down, None, 5, 2), Some(0));
-        assert_eq!(moved(Wait::Up, None, 5, 2), Some(0));
-        assert_eq!(moved(Wait::Bottom, None, 5, 2), Some(4));
+        assert_eq!(moved(Move::Down, None, 5, 2), Some(0));
+        assert_eq!(moved(Move::Up, None, 5, 2), Some(0));
+        assert_eq!(moved(Move::Bottom, None, 5, 2), Some(4));
         // Stepping is clamped to the ends.
-        assert_eq!(moved(Wait::Down, Some(4), 5, 2), Some(4));
-        assert_eq!(moved(Wait::Up, Some(0), 5, 2), Some(0));
-        assert_eq!(moved(Wait::HalfDown, Some(0), 5, 2), Some(2));
-        assert_eq!(moved(Wait::HalfUp, Some(4), 5, 2), Some(2));
-        assert_eq!(moved(Wait::Top, Some(3), 5, 2), Some(0));
-        // An empty list has nothing to select; non-movement keys are inert.
-        assert_eq!(moved(Wait::Down, Some(0), 0, 2), None);
-        assert_eq!(moved(Wait::Open, Some(1), 5, 2), Some(1));
+        assert_eq!(moved(Move::Down, Some(4), 5, 2), Some(4));
+        assert_eq!(moved(Move::Up, Some(0), 5, 2), Some(0));
+        assert_eq!(moved(Move::HalfDown, Some(0), 5, 2), Some(2));
+        assert_eq!(moved(Move::HalfUp, Some(4), 5, 2), Some(2));
+        assert_eq!(moved(Move::Top, Some(3), 5, 2), Some(0));
+        // An empty list has nothing to select.
+        assert_eq!(moved(Move::Down, Some(0), 0, 2), None);
     }
 
     #[test]

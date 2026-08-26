@@ -43,8 +43,8 @@ logic, re-capture or hand-edit the relevant fixture and update the assertions in
 ## The README screenshot
 
 The README image is generated from made-up data — never from a real repo. The
-`demo` example feeds a fake `Sections` through the same `render_body` the binary
-uses, so the shot can't drift from the real layout:
+`demo` example feeds a fake `Sections` through the same `render_to_string` the
+binary uses, so the shot can't drift from the real layout:
 
 ```sh
 task screenshot                      # regenerate, upload, and relink it

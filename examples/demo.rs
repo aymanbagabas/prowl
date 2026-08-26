@@ -1,9 +1,9 @@
 //! Renders the dashboard from fake data, for the README screenshot.
 //!
 //! Real output can't be published (it's whatever repo you're watching), so this
-//! feeds a made-up `Sections` through the same `render_body` the binary uses —
-//! the shot can't drift from the real layout. Timestamps are relative to now,
-//! so the ages stay sensible whenever it's regenerated.
+//! feeds a made-up `Sections` through the same `render_to_string` the binary
+//! uses — the shot can't drift from the real layout. Timestamps are relative to
+//! now, so the ages stay sensible whenever it's regenerated.
 //!
 //! ```sh
 //! cargo run --quiet --example demo            # the "my PRs" view
@@ -13,15 +13,16 @@
 
 use chrono::{Duration, SecondsFormat, Utc};
 use clap::Parser;
+use prowl::Ui;
 use prowl::changes::Changes;
 use prowl::cli::{Cli, View};
 use prowl::commits::{Bucket, CommitStats, Count, Release, ReleaseRef};
 use prowl::merged::MergedRow;
 use prowl::prs::PrRow;
 use prowl::queue::QueueRow;
-use prowl::render;
 use prowl::reviews::{ReviewRow, ReviewedMergedRow};
 use prowl::status::{Checks, Mergeable, ReviewState, Status};
+use uncurses::color::Profile;
 
 const REPO: &str = "acme/rocket";
 
@@ -294,12 +295,21 @@ fn main() {
         newly_merged: [394].into_iter().collect(),
     };
 
-    let body = prowl::render_body(&sections(), &cli, view, &changes, true, Some(1));
-    let bottom = prowl::bottom(
-        "",
-        "",
-        &render::footer("5m", false, true),
-        &render::help(view, false, true),
+    let ui = Ui {
+        view,
+        selected: Some(1),
+        show_help: true,
+        ..Ui::once(&cli)
+    };
+    println!(
+        "{}",
+        prowl::render_to_string(
+            &sections(),
+            &ui,
+            &changes,
+            Some(("5m", false)),
+            false,
+            Profile::TrueColor,
+        )
     );
-    print!("{body}{bottom}");
 }

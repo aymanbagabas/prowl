@@ -23,7 +23,7 @@ Keys (while watching):
   ?                toggle the help legend
   Ctrl-C           quit";
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = "prowl",
     version,

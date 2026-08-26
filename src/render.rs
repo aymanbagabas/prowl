@@ -1,34 +1,58 @@
-//! Terminal rendering: styled, aligned tables with OSC-8 hyperlinks, concise
-//! section headers, the dim key-hint footer, and the bell. Every escape is
-//! gated on a `styled` flag, so piped / non-TTY output is plain text.
+//! Dashboard rendering: the styled, aligned view is painted **directly onto an
+//! `uncurses` surface** — an offscreen [`TextBuffer`](uncurses::buffer::TextBuffer)
+//! for one-shot output, or the watch [`Screen`](uncurses::screen::Screen). There is
+//! one painter, so the layout lives in exactly one place.
+//!
+//! Width math uses the surface's own [`str_width`](uncurses::text::TextSurface::str_width)
+//! and column gaps are implicit (unpainted cells stay blank, so no padding is
+//! emitted). Each cell's OSC-8 link rides in its style, and the surface's color
+//! [`Profile`](uncurses::color::Profile) downsamples styling at encode/render
+//! time — so piped output (a `Disabled` profile) degrades to plain text with no
+//! special-casing here.
 
 use crate::cli::View;
-use crate::status::{self, Lamp, Rgb};
-use anstyle::Style;
-use std::fmt::Write as _;
-use std::io::Write as _;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use crate::status::{self, Lamp};
+use uncurses::ansi::truncate::truncate as truncate_tail;
+use uncurses::buffer::{Bounded, Surface, SurfaceMut, TextBuffer, View as BufView};
+use uncurses::color::{Color, Profile};
+use uncurses::layout::{Position, Rect};
+use uncurses::style::Style;
+use uncurses::text::{Encode, TextSurface};
 
 /// The whole dashboard is kept within this many display columns; the flexible
 /// title column is truncated (with an ellipsis) to make every table fit.
 pub const MAX_WIDTH: usize = 120;
 
+/// Two blank columns separate adjacent table columns.
+const SEP: usize = 2;
+
 /// One lamp of the check semaphore: dim when zero, its palette color (bold)
 /// when not, so only the counts that matter catch the eye.
 pub fn lamp_cell(n: u64, lamp: Lamp) -> Cell {
     if n == 0 {
-        Cell::styled("0".to_string(), Style::new().dimmed())
+        Cell::styled("0".to_string(), Style::new().faint())
     } else {
         Cell::styled(n.to_string(), status::fg(status::lamp_color(lamp)).bold())
     }
 }
 
-/// One table cell: visible text plus how to style and (optionally) link it.
+/// One table cell: visible text plus its style. The style carries any OSC-8
+/// link (uncurses styles hold the hyperlink), so there is no separate field.
 #[derive(Clone, Debug)]
 pub struct Cell {
     pub text: String,
     pub style: Style,
-    pub link: Option<String>,
+}
+
+/// A per-URL OSC-8 `id=` parameter: the first 7 hex chars of the URL's hash, so
+/// terminals treat each link (e.g. a PR number) as one distinct hyperlink and
+/// don't merge adjacent ones.
+fn link_params(url: &str) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    url.hash(&mut h);
+    let hex = format!("{:016x}", h.finish());
+    format!("id={}", &hex[..7])
 }
 
 impl Cell {
@@ -36,35 +60,44 @@ impl Cell {
         Cell {
             text: text.into(),
             style: Style::new(),
-            link: None,
         }
     }
 
-    pub fn styled(text: impl Into<String>, style: Style) -> Cell {
+    pub fn styled(text: impl Into<String>, style: impl Into<Style>) -> Cell {
         Cell {
             text: text.into(),
-            style,
-            link: None,
+            style: style.into(),
         }
     }
 
     /// A dim + underlined OSC-8 hyperlink whose visible text is `text`.
     pub fn link(text: impl Into<String>, url: impl Into<String>) -> Cell {
+        let url = url.into();
+        let params = link_params(&url);
         Cell {
             text: text.into(),
-            style: Style::new().dimmed().underline(),
-            link: Some(url.into()),
+            style: Style::new().faint().underline().link(url, params),
         }
     }
 
     /// An OSC-8 hyperlink carrying an explicit style (e.g. a colored, clickable
     /// PR number). Underlined so it reads as a link even when colored.
-    pub fn link_styled(text: impl Into<String>, url: impl Into<String>, style: Style) -> Cell {
+    pub fn link_styled(
+        text: impl Into<String>,
+        url: impl Into<String>,
+        style: impl Into<Style>,
+    ) -> Cell {
+        let url = url.into();
+        let params = link_params(&url);
         Cell {
             text: text.into(),
-            style: style.underline(),
-            link: Some(url.into()),
+            style: style.into().underline().link(url, params),
         }
+    }
+
+    /// A styled, clickable `#<number>` PR link.
+    pub fn pr(number: i64, url: impl Into<String>, style: impl Into<Style>) -> Cell {
+        Cell::link_styled(format!("#{number}"), url, style)
     }
 }
 
@@ -74,231 +107,172 @@ pub struct Table {
     pub rows: Vec<Vec<Cell>>,
 }
 
-fn w(s: &str) -> usize {
-    UnicodeWidthStr::width(s)
-}
-
 /// Truncate `s` to at most `max` display columns, marking the cut with an
-/// ellipsis (`\u{22ef}`, or `...` in ASCII mode). Returns `s` unchanged when it
-/// already fits.
+/// ellipsis (`\u{22ef}`, or `...` in ASCII mode). Delegates to the uncurses
+/// width-aware truncator, so it counts display columns, not bytes.
 pub fn truncate(s: &str, max: usize, ascii: bool) -> String {
-    if w(s) <= max {
-        return s.to_string();
-    }
-    let ell = if ascii { "..." } else { "\u{22ef}" };
-    let budget = max.saturating_sub(w(ell));
-    let mut out = String::new();
-    let mut width = 0;
-    for ch in s.chars() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + cw > budget {
-            break;
-        }
-        out.push(ch);
-        width += cw;
-    }
-    out.push_str(ell);
-    out
+    truncate_tail(s, max, if ascii { "..." } else { "\u{22ef}" })
 }
 
-/// The display width of column `c`: its header and widest cell.
-fn col_width(table: &Table, c: usize) -> usize {
-    let mut cw = w(table.header[c]);
+/// The display width of table column `c`: its header and widest cell.
+fn col_width(s: &impl TextSurface, table: &Table, c: usize) -> usize {
+    let mut w = s.str_width(table.header[c]) as usize;
     for row in &table.rows {
         if let Some(cell) = row.get(c) {
-            cw = cw.max(w(&cell.text));
+            w = w.max(s.str_width(&cell.text) as usize);
         }
     }
-    cw
+    w
 }
 
-/// The display width of every column of `table` except `skip`, plus the
-/// two-space separators — i.e. how wide a row is without its flexible column.
-fn fixed_width(table: &Table, skip: usize) -> usize {
+/// The width of every column of `table` except `skip`, plus the separators —
+/// i.e. how wide a row is without its flexible column.
+fn fixed_width(s: &impl TextSurface, table: &Table, skip: usize) -> usize {
     let cols = table.header.len();
     let total: usize = (0..cols)
         .filter(|&c| c != skip)
-        .map(|c| col_width(table, c))
+        .map(|c| col_width(s, table, c))
         .sum();
-    total + 2 * cols.saturating_sub(1)
+    total + SEP * cols.saturating_sub(1)
 }
 
-/// Cap and align the `TITLE` column across several tables so they line up and
-/// the widest row of every table fits within `MAX_WIDTH`. The title column is
-/// truncated (with an ellipsis) and padded to one shared width.
-pub fn fit_titles(tables: &mut [&mut Table], ascii: bool) {
+/// The shared `TITLE` column width across `tables`, capped so the widest row of
+/// every table fits within [`MAX_WIDTH`]. Pass this to [`paint_table`] so the
+/// section tables line up and the whole view stays within the budget.
+pub fn title_width(s: &impl TextSurface, tables: &[&Table]) -> usize {
     let mut natural = 0;
     let mut fixed = 0;
-    let idxs: Vec<Option<usize>> = tables
-        .iter()
-        .map(|t| t.header.iter().position(|h| *h == "TITLE"))
-        .collect();
-    for (t, idx) in tables.iter().zip(&idxs) {
-        if let Some(ti) = idx {
-            natural = natural.max(col_width(t, *ti));
-            fixed = fixed.max(fixed_width(t, *ti));
+    for t in tables {
+        if let Some(ti) = t.header.iter().position(|h| *h == "TITLE") {
+            natural = natural.max(col_width(s, t, ti));
+            fixed = fixed.max(fixed_width(s, t, ti));
         }
     }
-    let budget = MAX_WIDTH.saturating_sub(fixed);
-    let target = natural.min(budget);
-    for (t, idx) in tables.iter_mut().zip(&idxs) {
-        if let Some(ti) = idx {
-            for row in &mut t.rows {
-                if let Some(cell) = row.get_mut(*ti) {
-                    let mut text = truncate(&cell.text, target, ascii);
-                    for _ in 0..target.saturating_sub(w(&text)) {
-                        text.push(' ');
-                    }
-                    cell.text = text;
-                }
-            }
-        }
-    }
+    natural.min(MAX_WIDTH.saturating_sub(fixed))
 }
 
-const OSC8_END: &str = "\x1b]8;;\x1b\\";
-
-fn osc8_start(url: &str) -> String {
-    format!("\x1b]8;;{url}\x1b\\")
-}
-
-/// Append one cell, padded to `col_w` unless it is the last column.
-fn push_cell(out: &mut String, cell: &Cell, col_w: usize, last: bool, styled: bool) {
-    if styled {
-        if let Some(url) = &cell.link {
-            out.push_str(&osc8_start(url));
-        }
-        let _ = write!(
-            out,
-            "{}{}{}",
-            cell.style.render(),
-            cell.text,
-            cell.style.render_reset()
-        );
-        if cell.link.is_some() {
-            out.push_str(OSC8_END);
-        }
-    } else {
-        out.push_str(&cell.text);
-    }
-    if !last {
-        for _ in 0..col_w.saturating_sub(w(&cell.text)) {
-            out.push(' ');
-        }
-    }
-}
-
-/// Render a table. Columns are left-aligned, padded to the widest cell (by
-/// display width), separated by two spaces; the header row is bold.
-pub fn render_table(table: &Table, styled: bool) -> String {
+/// Paint `table` onto `s` starting at row `top`, forcing the `TITLE` column to
+/// `title_w` columns when present (titles longer than that are ellipsized).
+/// Columns are left-aligned and separated by two blank columns; the header row
+/// is bold. Returns the next free row.
+pub fn paint_table(
+    s: &mut impl TextSurface,
+    table: &Table,
+    title_w: usize,
+    ascii: bool,
+    top: u16,
+) -> u16 {
     let cols = table.header.len();
-    let mut widths = vec![0usize; cols];
-    for (i, h) in table.header.iter().enumerate() {
-        widths[i] = w(h);
+    let title_idx = table.header.iter().position(|h| *h == "TITLE");
+
+    let mut widths: Vec<usize> = (0..cols).map(|c| col_width(s, table, c)).collect();
+    if let Some(ti) = title_idx {
+        widths[ti] = title_w;
     }
-    for row in &table.rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < cols {
-                widths[i] = widths[i].max(w(&cell.text));
-            }
+
+    // Column start positions: running sum of widths plus the separators.
+    let mut xs = vec![0u16; cols];
+    let mut acc = 0usize;
+    for i in 0..cols {
+        xs[i] = acc as u16;
+        acc += widths[i] + SEP;
+    }
+
+    let bold = Style::new().bold();
+    for (i, h) in table.header.iter().enumerate() {
+        if !h.is_empty() {
+            s.set_str((xs[i], top), h, &bold);
         }
     }
 
-    let mut out = String::new();
-    let header_style = if styled {
-        Style::new().bold()
+    for (r, row) in table.rows.iter().enumerate() {
+        let y = top + 1 + r as u16;
+        for (i, cell) in row.iter().enumerate() {
+            let text = if Some(i) == title_idx {
+                truncate(&cell.text, widths[i], ascii)
+            } else {
+                cell.text.clone()
+            };
+            s.set_str((xs[i], y), &text, &cell.style);
+        }
+    }
+    top + 1 + table.rows.len() as u16
+}
+
+/// Paint `table` alone onto an offscreen buffer and encode it to a string,
+/// either styled (SGR + OSC-8) or plain. Plain output implies ASCII mode, as it
+/// does for the dashboard. A convenience for checking a single section's output
+/// without standing up a whole dashboard.
+#[must_use]
+pub fn render_table(table: &Table, styled: bool) -> String {
+    let height = table.rows.len() as u16 + 1;
+    let mut buf = TextBuffer::new(MAX_WIDTH as u16, height);
+    let title_w = title_width(&buf, &[table]);
+    paint_table(&mut buf, table, title_w, !styled, 0);
+    let mut out = Vec::new();
+    let profile = if styled {
+        Profile::TrueColor
     } else {
-        Style::new()
+        Profile::Disabled
     };
-    for (i, h) in table.header.iter().enumerate() {
-        let last = i + 1 == cols;
-        push_cell(
-            &mut out,
-            &Cell::styled((*h).to_string(), header_style),
-            widths[i],
-            last,
-            styled,
-        );
-        if !last {
-            out.push_str("  ");
-        }
-    }
-    out.push('\n');
-    for row in &table.rows {
-        for (i, cell) in row.iter().enumerate() {
-            let last = i + 1 == cols;
-            push_cell(&mut out, cell, widths[i], last, styled);
-            if !last {
-                out.push_str("  ");
-            }
-        }
-        out.push('\n');
-    }
-    out
+    buf.encode_with(&mut out, profile)
+        .expect("encoding to a Vec cannot fail");
+    String::from_utf8(out).expect("uncurses encodes valid UTF-8")
 }
 
-/// Render a single cell (its style and optional OSC-8 link) with no padding,
-/// for non-table contexts such as the shipments PR list.
-pub fn render_cell(cell: &Cell, styled: bool) -> String {
-    let mut out = String::new();
-    push_cell(&mut out, cell, 0, true, styled);
-    out
+/// Paint a dim one-liner (the error line, `Loading...`) at row `y`, flush left.
+/// Returns y + 1.
+pub fn paint_dim(s: &mut impl TextSurface, msg: &str, y: u16) -> u16 {
+    paint_dim_at(s, msg, 0, y)
 }
 
-/// A concise, non-figlet section header: a colored bold accent bar, the title,
-/// an optional dim count badge (already formatted, e.g. `6` or `47+`), and an
-/// optional dim trailing note (e.g. the merge-queue ETA).
-pub fn header(
+/// Paint a dim one-liner indented by `indent` columns. Returns y + 1.
+pub fn paint_dim_at(s: &mut impl TextSurface, msg: &str, indent: u16, y: u16) -> u16 {
+    s.set_str((indent, y), msg, Style::new().faint());
+    y + 1
+}
+
+/// Paint a section header at row `y`: a colored bold accent bar, the title, an
+/// optional dim count badge (or `Title (count)` in ASCII mode), and an optional
+/// dim trailing note (e.g. the merge-queue ETA). Returns y + 1.
+pub fn paint_header(
+    s: &mut impl TextSurface,
     title: &str,
-    accent: Rgb,
+    accent: Color,
     count: Option<&str>,
     note: Option<&str>,
-    styled: bool,
-) -> String {
-    if styled {
-        let bar = status::fg(accent).bold();
-        let dim = Style::new().dimmed();
-        let seg = |s: &str| format!("  {}{}{}", dim.render(), s, dim.render_reset());
-        let count_part = count.map(&seg).unwrap_or_default();
-        let note_part = note.map(&seg).unwrap_or_default();
-        format!(
-            "{}\u{258c} {title}{}{count_part}{note_part}",
-            bar.render(),
-            bar.render_reset(),
-        )
-    } else {
-        let mut out = match count {
+    ascii: bool,
+    y: u16,
+) -> u16 {
+    let dim = Style::new().faint();
+    let mut end = if ascii {
+        let text = match count {
             Some(c) => format!("{title} ({c})"),
             None => title.to_string(),
         };
-        if let Some(n) = note {
-            let _ = write!(out, "  {n}");
-        }
-        out
-    }
-}
-
-/// A dim one-liner: an empty-section placeholder, or other plain dim text (the
-/// error line, the loading screen). Plain when not styled.
-pub fn empty_line(msg: &str, styled: bool) -> String {
-    if styled {
-        let dim = Style::new().dimmed();
-        format!("{}{msg}{}", dim.render(), dim.render_reset())
+        s.set_str((0, y), &text, None)
     } else {
-        msg.to_string()
+        let end = s.set_str(
+            (0, y),
+            &format!("\u{258c} {title}"),
+            status::fg(accent).bold(),
+        );
+        match count {
+            Some(c) => s.set_str((end.x + 2, y), c, &dim),
+            None => end,
+        }
+    };
+    if let Some(n) = note {
+        end = s.set_str((end.x + 2, y), n, &dim);
     }
+    let _ = end;
+    y + 1
 }
 
 /// Where a table row's PR column starts: the (blank) marker cell and the
 /// per-row glyph cell, each one column wide, plus their two-space separators.
 /// Empty-section placeholders are indented by it so they read as a row.
-pub const ROW_INDENT: usize = 6;
-
-/// A dim placeholder standing in for an empty section's rows, indented by
-/// `indent` columns so it lines up with the rows it stands in for.
-pub fn placeholder(msg: &str, indent: usize, styled: bool) -> String {
-    format!("{}{}", " ".repeat(indent), empty_line(msg, styled))
-}
+pub const ROW_INDENT: u16 = 6;
 
 /// A leading cell marking a row that changed since the previous refresh.
 pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
@@ -310,436 +284,377 @@ pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     }
 }
 
-/// The selection background for the row the navigation cursor is on: the whole
-/// line is painted with it (see `highlight_selected`), so the leading column
-/// stays free for the change marker.
-pub fn select_style() -> Style {
-    status::bg(status::SURFACE)
-}
-
-/// Mark `row` as the selected one by giving its first cell the selection
-/// background. The cell keeps its own styling, and the background is what
-/// `highlight_selected` looks for to paint the rest of the line.
-pub fn select_row(row: &mut [Cell]) {
-    if let Some(first) = row.first_mut() {
-        first.style = first.style.bg_color(select_style().get_bg_color());
-    }
-}
-
-/// The escape sequence setting the selection background. `anstyle` renders each
-/// attribute as its own sequence, so this appears verbatim in a marked cell
-/// however that cell is otherwise styled.
-fn select_bg() -> String {
-    select_style().render().to_string()
-}
-
-const RESET: &str = "\x1b[0m";
-
-/// The display width of `s`, ignoring the escapes in it (SGR attributes and
-/// OSC-8 hyperlinks) — i.e. how many columns it actually paints.
-fn visible_width(s: &str) -> usize {
-    let mut width = 0;
-    let mut chars = s.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\x1b' {
-            width += UnicodeWidthChar::width(ch).unwrap_or(0);
-            continue;
-        }
-        match chars.next() {
-            // CSI: parameter bytes, then a final byte in `@`..`~`.
-            Some('[') => {
-                for c in chars.by_ref() {
-                    if ('\u{40}'..='\u{7e}').contains(&c) {
-                        break;
-                    }
-                }
-            }
-            // OSC: a payload ended by BEL or a string terminator (ESC \).
-            Some(']') => {
-                let mut esc = false;
-                for c in chars.by_ref() {
-                    if c == '\x07' || (esc && c == '\\') {
-                        break;
-                    }
-                    esc = c == '\x1b';
-                }
-            }
-            _ => {}
+/// Paint the selection background across the whole of row `y` — edge to edge,
+/// not just the painted text — so the row the navigation cursor is on reads as
+/// one solid bar. It replaces a caret glyph, leaving the leading column free, so
+/// a row that is both changed and selected shows both. Only the background is
+/// set: every cell keeps its text, color and link. Runs after the body is
+/// painted, so it covers a hand-laid-out section (the shipments) exactly as it
+/// covers the tables.
+pub fn highlight_row(s: &mut impl TextSurface, y: u16) {
+    let b = s.bounds();
+    for x in b.x..b.x + b.width {
+        if let Some(cell) = s.cell_mut(Position::new(x, y)) {
+            cell.style.bg = Some(status::SURFACE);
         }
     }
-    width
 }
 
-/// Paint the selected row across the full width of the body: the row is marked
-/// by `select_row`, which only backgrounds its leading cell, so here the
-/// background is re-armed after every cell's reset and the line is padded out to
-/// the widest line in the body. The result is one solid bar. Bodies with no
-/// selection (and unstyled ones, which carry no escapes at all) come back
-/// unchanged.
-pub fn highlight_selected(body: &str) -> String {
-    let bg = select_bg();
-    if !body.contains(&bg) {
-        return body.to_string();
-    }
-    let width = body.split('\n').map(visible_width).max().unwrap_or(0);
-    let rearmed = format!("{RESET}{bg}");
-    body.split('\n')
-        .map(|line| {
-            if !line.contains(&bg) {
-                return line.to_string();
-            }
-            let mut out = String::with_capacity(line.len() + width);
-            out.push_str(&bg);
-            out.push_str(&line.replace(RESET, &rearmed));
-            for _ in 0..width.saturating_sub(visible_width(line)) {
-                out.push(' ');
-            }
-            out.push_str(RESET);
-            out
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// The help legend for `view`: only the glyphs that view actually uses, so a
-/// glyph the other view reuses for something else can't muddy it. The Mine view
-/// lists the mergeability glyphs, the Reviews view the review-state glyphs. The
-/// column headers explain themselves, so they are not repeated here. The title
-/// reuses the section-header style; meanings are dim. Rendered above the search
-/// prompt / footer, since it documents the keys they list.
-pub fn help(view: View, ascii: bool, styled: bool) -> String {
-    let dim = Style::new().dimmed();
-    let mut out = String::new();
-
-    out.push_str(&header("Help", status::OVERLAY, None, None, styled));
-    out.push('\n');
-
-    // Navigation keys — the footer only lists the action keys, so document the
-    // movement cursor here.
-    let sep = if ascii { " | " } else { "  \u{b7}  " };
-    let keys = format!(
-        "j/k move{sep}g/G first/last{sep}^D/^U half page{sep}enter open{sep}y copy link{sep}Y copy section{sep}/ filter"
-    );
-    if styled {
-        let _ = writeln!(out, "  {}{keys}{}", dim.render(), dim.render_reset());
-    } else {
-        let _ = writeln!(out, "  {keys}");
-    }
-
-    // One "glyph  meaning" line: colored glyph, dim meaning (plain when unstyled).
-    let line = |out: &mut String, ch: char, color: Rgb, meaning: &str| {
-        if styled {
-            let g = status::fg(color);
-            let _ = writeln!(
-                out,
-                "  {}{ch}{}  {}{meaning}{}",
-                g.render(),
-                g.render_reset(),
-                dim.render(),
-                dim.render_reset()
-            );
-        } else {
-            let _ = writeln!(out, "  {ch}  {meaning}");
-        }
-    };
-
-    match view {
-        View::Mine => {
-            for m in status::MERGEABLE_ORDER {
-                line(
-                    &mut out,
-                    status::mergeable_glyph(m, ascii),
-                    status::mergeable_style(m).1,
-                    status::mergeable_meaning(m),
-                );
-            }
-        }
-        View::Reviews => {
-            for r in status::REVIEW_ORDER {
-                line(
-                    &mut out,
-                    status::review_glyph(r, ascii),
-                    status::review_style(r).1,
-                    status::review_meaning(r),
-                );
-            }
-        }
-    }
-    out
-}
-
-/// The watch-mode key hints shown at the very bottom, with the refresh interval
-/// folded into the refresh hint: `r refresh (every 5m) - tab switch view - enter
-/// open - / search - ? help`. While a refresh is in flight the first hint
-/// becomes `r refreshing` (the interval is dropped and the `r` glyph is dimmed,
-/// since `r` is inert until the fetch finishes). Each key glyph is a bold muted
-/// accent, its labels dim; plain when unstyled.
-pub fn footer(interval: &str, refreshing: bool, styled: bool) -> String {
+/// Paint the watch-mode key-hint footer at row `y`, folding the constant
+/// refresh interval into the refresh hint: `r refresh (every 5m) - tab switch
+/// view - enter open - / search - ? help`. While a refresh is in flight the
+/// first hint becomes `r refreshing` (the interval is dropped and the `r` glyph
+/// is dimmed, since `r` is inert until the fetch finishes). Each key glyph is a
+/// bold muted accent, its labels dim; plain in ASCII mode. Returns y + 1.
+pub fn paint_footer(
+    s: &mut impl TextSurface,
+    interval: &str,
+    refreshing: bool,
+    ascii: bool,
+    y: u16,
+) -> u16 {
     let refresh = if refreshing {
         "refreshing".to_string()
     } else {
         format!("refresh (every {interval})")
     };
-    if !styled {
-        return format!("r {refresh} - tab switch view - enter open - y copy - / search - ? help");
+    let hints = [
+        ("r", refresh.as_str()),
+        ("tab", "switch view"),
+        ("enter", "open"),
+        ("y", "copy"),
+        ("/", "search"),
+        ("?", "help"),
+    ];
+    if ascii {
+        let line = hints
+            .iter()
+            .map(|(k, l)| format!("{k} {l}"))
+            .collect::<Vec<_>>()
+            .join(" - ");
+        s.set_str((0, y), &line, None);
+        return y + 1;
     }
     let key = status::fg(status::OVERLAY).bold();
-    let dim = Style::new().dimmed();
-    // Each hint is `<key> <label>`: the key glyph a bold accent, the label dim.
-    // While refreshing, `r` is inert, so its glyph is dimmed too and the whole
-    // hint reads as disabled.
-    let hint = |k_style: Style, k: &str, label: &str| {
-        format!(
-            "{}{k}{} {}{label}{}",
-            k_style.render(),
-            k_style.render_reset(),
-            dim.render(),
-            dim.render_reset(),
-        )
-    };
-    let r_style = if refreshing { dim } else { key };
-    let sep = format!("{} - {}", dim.render(), dim.render_reset());
-    format!(
-        "{}{sep}{}{sep}{}{sep}{}{sep}{}{sep}{}",
-        hint(r_style, "r", &refresh),
-        hint(key, "tab", "switch view"),
-        hint(key, "enter", "open"),
-        hint(key, "y", "copy"),
-        hint(key, "/", "search"),
-        hint(key, "?", "help")
-    )
-}
-
-/// The view switcher shown at the top while watching: both view names, the
-/// active one accented with a section-style bar, the other dim. When unstyled,
-/// the active view is bracketed instead.
-pub fn tabs(view: View, styled: bool) -> String {
-    let names = [(View::Mine, "my PRs"), (View::Reviews, "reviews")];
-    if !styled {
-        return names
-            .iter()
-            .map(|(v, n)| {
-                if *v == view {
-                    format!("[{n}]")
-                } else {
-                    (*n).to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("  ");
-    }
-    let bar = status::fg(status::LAVENDER).bold();
-    let dim = Style::new().dimmed();
-    names
-        .iter()
-        .map(|(v, n)| {
-            if *v == view {
-                format!("{}\u{258c}{n}{}", bar.render(), bar.render_reset())
-            } else {
-                format!("{}{n}{}", dim.render(), dim.render_reset())
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("  ")
-}
-
-/// Clear the screen and home the cursor.
-pub fn clear() -> &'static str {
-    "\x1b[2J\x1b[H"
-}
-
-/// Home the cursor without clearing. The pinned watch frame repaints every row
-/// in place and each row erases its own tail, so clearing first would only add
-/// a flash of blank screen between frames.
-pub const HOME: &str = "\x1b[H";
-
-/// Erase from the cursor to the end of the line, so a short row can't leave the
-/// tail of a longer previous one behind.
-const ERASE_LINE: &str = "\x1b[K";
-
-/// Take the terminal over for the watch dashboard: enter the alternate screen
-/// buffer (`?1049h`), turn autowrap off (`?7l`), and hide the cursor (`?25l`).
-/// Autowrap has to go because the pinned frame assumes one screen row per
-/// rendered line — on a terminal narrower than the dashboard, an over-long line
-/// must be clipped by the terminal rather than wrapped onto a second row.
-pub const ENTER_SCREEN: &str = "\x1b[?1049h\x1b[?7l\x1b[?25l";
-
-/// Hand the terminal back, exactly reversing `ENTER_SCREEN`: show the cursor,
-/// restore autowrap, and leave the alternate screen — which puts the shell's
-/// scrollback back the way we found it.
-pub const LEAVE_SCREEN: &str = "\x1b[?25h\x1b[?7h\x1b[?1049l";
-
-/// The index of the body line carrying the selection, if any — what the pinned
-/// frame scrolls to keep in view. The selection background is unique to that
-/// line (nothing else in the dashboard sets one), so looking for the sequence
-/// locates the selected row wherever it was drawn, including in the shipments
-/// section, which lays out its rows by hand.
-pub fn caret_line(body: &str) -> Option<usize> {
-    let bg = select_bg();
-    body.lines().position(|l| l.contains(&bg))
-}
-
-/// Compose one screen of exactly `rows` lines: as much of `body` as fits, blank
-/// padding, then `bottom` glued to the last rows. When the body is taller than
-/// the space left over it scrolls, keeping `caret` (an index into the body's
-/// lines) centered in view. Every line erases its own tail and the last one has
-/// no trailing newline, so painting this over the previous frame repaints the
-/// screen in place without ever scrolling it.
-pub fn frame(body: &str, bottom: &str, rows: usize, caret: Option<usize>) -> String {
-    let body: Vec<&str> = body.lines().collect();
-    let all_bottom: Vec<&str> = bottom.lines().collect();
-    // The bottom block wins the space it needs; if it alone overflows (a short
-    // terminal with the help legend open), it keeps its tail — the search
-    // prompt, error line and footer — and the legend above them is what gets cut.
-    let bottom = &all_bottom[all_bottom.len().saturating_sub(rows)..];
-    let avail = rows - bottom.len();
-
-    // Centering the caret makes the body scroll a line at a time in either
-    // direction; with no caret (or nothing to scroll) we sit at the top.
-    let off = match caret {
-        Some(c) if body.len() > avail => c
-            .saturating_sub(avail / 2)
-            .min(body.len().saturating_sub(avail)),
-        _ => 0,
-    };
-    let shown = body.len().saturating_sub(off).min(avail);
-
-    let mut out = String::new();
-    let lines = body[off..off + shown]
-        .iter()
-        .copied()
-        .chain(std::iter::repeat_n("", avail - shown))
-        .chain(bottom.iter().copied());
-    for (i, line) in lines.enumerate() {
+    let dim = Style::new().faint();
+    let mut x = 0u16;
+    for (i, (k, label)) in hints.iter().enumerate() {
         if i > 0 {
-            out.push_str("\r\n");
+            x = s.set_str((x, y), " - ", &dim).x;
         }
-        out.push_str(line);
-        out.push_str(ERASE_LINE);
+        // `r` is inert while a fetch is in flight, so its glyph fades to dim.
+        let kstyle = if i == 0 && refreshing { &dim } else { &key };
+        let p = s.set_str((x, y), k, kstyle);
+        x = s.set_str((p.x + 1, y), label, &dim).x;
     }
-    out
+    y + 1
 }
 
-/// The dim placeholder shown during the very first fetch, before any data has
-/// been rendered.
-pub fn loading(styled: bool) -> String {
-    empty_line("Loading...", styled)
+/// Paint the view switcher at row `y`: both view names, the active one accented
+/// with a section-style bar, the other dim (the active one is bracketed in ASCII
+/// mode). Returns y + 1.
+pub fn paint_tabs(s: &mut impl TextSurface, view: View, ascii: bool, y: u16) -> u16 {
+    let names = [(View::Mine, "my PRs"), (View::Reviews, "reviews")];
+    let bar = status::fg(status::LAVENDER).bold();
+    let dim = Style::new().faint();
+    let mut x = 0u16;
+    for (v, n) in names {
+        let active = v == view;
+        x = if ascii {
+            let text = if active {
+                format!("[{n}]")
+            } else {
+                n.to_string()
+            };
+            s.set_str((x, y), &text, None).x
+        } else if active {
+            s.set_str((x, y), &format!("\u{258c}{n}"), &bar).x
+        } else {
+            s.set_str((x, y), n, &dim).x
+        };
+        x += 2;
+    }
+    y + 1
 }
 
-/// Ring the terminal bell once.
-pub fn ring_bell() {
-    print!("\x07");
-    let _ = std::io::stdout().flush();
-}
-
-/// The search prompt line: an accented `/`, the query (with a block cursor while
-/// typing), and a dim match count. Plain when unstyled.
-pub fn search_prompt(query: &str, searching: bool, matches: usize, styled: bool) -> String {
+/// Paint the search prompt at row `y`: an accented `/`, the query, and a dim
+/// match count. Returns the next free row and the cell just past the query — the
+/// caret position, for the caller to park the terminal's own cursor on while the
+/// prompt is capturing (this paints no cursor of its own).
+pub fn paint_search_prompt(
+    s: &mut impl TextSurface,
+    query: &str,
+    matches: usize,
+    ascii: bool,
+    y: u16,
+) -> (u16, Position) {
     let count = if matches == 1 {
         "1 match".to_string()
     } else {
         format!("{matches} matches")
     };
-    if !styled {
-        let cursor = if searching { "_" } else { "" };
-        return format!("/{query}{cursor}  ({count})");
+    let prompt = format!("/{query}");
+    let style = if ascii {
+        Style::new()
+    } else {
+        status::fg(status::PEACH).bold()
+    };
+    let caret = s.set_str((0, y), &prompt, style);
+    // Two blank columns keep the count clear of the cursor's cell.
+    s.set_str(
+        (caret.x + 2, y),
+        &format!("({count})"),
+        Style::new().faint(),
+    );
+    (y + 1, caret)
+}
+
+/// Compose one screen of exactly `rows` rows: as much of `body` as fits at the
+/// top, then `bottom` glued to the last rows. When the body is taller than the
+/// space left over it scrolls, keeping `caret` (a row index into `body`) centered
+/// in view. `screen` is assumed already cleared, so the gap between the two is
+/// blank padding.
+///
+/// Returns the row the bottom block starts on and how many rows were cut from
+/// its head, which callers need to translate a position inside it (the search
+/// caret) into screen coordinates: bottom row `y` lands on `top + y - cut`, and
+/// a row above `cut` was not drawn at all.
+pub fn compose<T: SurfaceMut + Bounded + ?Sized>(
+    screen: &mut T,
+    body: &mut TextBuffer,
+    body_h: u16,
+    bottom: &mut TextBuffer,
+    bottom_h: u16,
+    rows: u16,
+    caret: Option<u16>,
+) -> (u16, u16) {
+    // The bottom block wins the space it needs; if it alone overflows (a short
+    // terminal with the help legend open) it keeps its tail — the search prompt,
+    // error line and footer — and the legend above them is what gets cut.
+    let shown_bottom = bottom_h.min(rows);
+    let cut = bottom_h - shown_bottom;
+    let avail = rows - shown_bottom;
+
+    // Centering the caret scrolls the body a row at a time in either direction;
+    // with no caret (or nothing to scroll) we sit at the top.
+    let off = match caret {
+        Some(c) if body_h > avail => c.saturating_sub(avail / 2).min(body_h - avail),
+        _ => 0,
+    };
+    if avail > 0 {
+        // A `View` clips without translating, so drawing it maps its top-left —
+        // the first visible body row — onto the top of the screen.
+        let w = body.width();
+        BufView::new(body, Rect::new(0, off, w, avail)).draw(screen, Position::new(0, 0));
     }
-    let slash = status::fg(status::PEACH).bold();
-    let dim = Style::new().dimmed();
-    // A reverse-video space is the block cursor while the prompt is capturing.
-    let cursor = if searching { "\x1b[7m \x1b[27m" } else { "" };
-    format!(
-        "{}/{}{query}{cursor}  {}({count}){}",
-        slash.render(),
-        slash.render_reset(),
-        dim.render(),
-        dim.render_reset(),
-    )
+    let top = rows - shown_bottom;
+    let bw = bottom.width();
+    BufView::new(bottom, Rect::new(0, cut, bw, shown_bottom)).draw(screen, Position::new(0, top));
+    (top, cut)
+}
+
+/// Paint one indented `glyph  meaning` legend row at `y`: the glyph in `gstyle`,
+/// two blank columns, then the meaning in `dim`.
+fn legend_row(
+    s: &mut impl TextSurface,
+    glyph: &str,
+    gstyle: Style,
+    meaning: &str,
+    dim: &Style,
+    y: u16,
+) {
+    let p = s.set_str((2, y), glyph, gstyle);
+    s.set_str((p.x + 2, y), meaning, dim);
+}
+
+/// Paint the help legend for `view` at row `top`: the navigation keys, then only
+/// the glyphs and values that view actually uses, so a glyph the other view
+/// reuses for something else can't muddy it. The Mine view lists the status
+/// glyphs + every `mergeStateStatus` value; the Reviews view lists the
+/// review-state glyphs + the merged glyph (its only shared icon). Painted above
+/// the search prompt / footer, since it documents the keys they list. Returns
+/// the next free row.
+pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -> u16 {
+    let dim = Style::new().faint();
+    let mut y = paint_header(s, "Help", status::OVERLAY, None, None, ascii, top);
+
+    // The footer only lists the action keys, so document the movement cursor here.
+    let sep = if ascii { " | " } else { "  \u{b7}  " };
+    let keys = format!(
+        "j/k move{sep}g/G first/last{sep}^D/^U half page{sep}enter open{sep}y copy link{sep}Y copy section{sep}/ filter"
+    );
+    s.set_str((2, y), &keys, &dim);
+    y += 1;
+
+    match view {
+        View::Mine => {
+            for m in status::MERGEABLE_ORDER {
+                let glyph = status::mergeable_glyph(m, ascii).to_string();
+                let color = status::fg(status::mergeable_style(m).1);
+                legend_row(s, &glyph, color, status::mergeable_meaning(m), &dim, y);
+                y += 1;
+            }
+        }
+        View::Reviews => {
+            for r in status::REVIEW_ORDER {
+                let glyph = status::review_glyph(r, ascii).to_string();
+                let color = status::fg(status::review_style(r).1);
+                legend_row(s, &glyph, color, status::review_meaning(r), &dim, y);
+                y += 1;
+            }
+        }
+    }
+    y
+}
+
+/// The number of legend rows [`paint_help`] paints for `view` (header + the key
+/// line + one row per entry), so callers can size a surface before painting.
+pub fn help_height(view: View) -> usize {
+    2 + match view {
+        View::Mine => status::MERGEABLE_ORDER.len(),
+        View::Reviews => status::REVIEW_ORDER.len(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uncurses::buffer::TextBuffer;
+    use uncurses::color::Profile;
+    use uncurses::text::Encode;
 
-    #[test]
-    fn header_appends_optional_note() {
-        // Plain: the note trails the count badge.
-        assert_eq!(
-            header(
-                "Merge Queue",
-                status::BLUE,
-                Some("3"),
-                Some("~11m to merge"),
-                false
-            ),
-            "Merge Queue (3)  ~11m to merge"
-        );
-        // No note behaves exactly as before.
-        assert_eq!(
-            header("Merge Queue", status::BLUE, Some("3"), None, false),
-            "Merge Queue (3)"
-        );
-        // Styled: the note is present and dim.
-        let styled = header(
-            "Merge Queue",
-            status::BLUE,
-            Some("3"),
-            Some("~11m to merge"),
-            true,
-        );
-        assert!(styled.contains("~11m to merge"));
-        assert!(styled.contains("\x1b[2m"));
+    /// Paint `f` into a fresh buffer and return its encoded form at `profile`.
+    fn encode(
+        width: u16,
+        height: u16,
+        profile: Profile,
+        f: impl FnOnce(&mut TextBuffer),
+    ) -> String {
+        let mut canvas = TextBuffer::new(width, height);
+        f(&mut canvas);
+        let mut out = Vec::new();
+        canvas.encode_with(&mut out, profile).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// Paint one text row per line of `lines` into a buffer of that height.
+    fn buf(lines: &[&str]) -> (TextBuffer, u16) {
+        let mut b = TextBuffer::new(8, lines.len().max(1) as u16);
+        for (y, l) in lines.iter().enumerate() {
+            b.set_str((0, y as u16), l, None);
+        }
+        (b, lines.len() as u16)
+    }
+
+    /// Compose onto a `rows`-tall screen and read the result back as trimmed rows.
+    fn screen_rows(body: &[&str], bottom: &[&str], rows: u16, caret: Option<u16>) -> Vec<String> {
+        let (mut b, bh) = buf(body);
+        let (mut bot, both) = buf(bottom);
+        let mut screen = TextBuffer::new(8, rows);
+        compose(&mut screen, &mut b, bh, &mut bot, both, rows, caret);
+        let mut out: Vec<String> = screen
+            .display_with(Profile::Disabled)
+            .to_string()
+            .lines()
+            .map(|l| l.trim_end().to_string())
+            .collect();
+        // The display drops trailing all-blank rows; the buffer still has them.
+        out.resize(rows as usize, String::new());
+        out
     }
 
     #[test]
-    fn footer_is_plain_or_styled_key_hints() {
+    fn compose_pins_the_bottom_block_to_the_last_rows() {
+        // A short body is padded out so the footer lands on the last row.
         assert_eq!(
-            footer("5m", false, false),
-            "r refresh (every 5m) - tab switch view - enter open - y copy - / search - ? help"
+            screen_rows(&["a", "b"], &["footer"], 6, None),
+            ["a", "b", "", "", "", "footer"]
         );
-        let styled = footer("5m", false, true);
-        // Visible text is preserved...
-        assert!(styled.contains("refresh (every 5m)"));
-        assert!(styled.contains("switch view"));
-        assert!(styled.contains("open"));
-        assert!(styled.contains("help"));
-        // ...with a bold key accent and a dim label.
-        assert!(styled.contains("\x1b[1m"));
-        assert!(styled.contains("\x1b[2m"));
     }
 
     #[test]
-    fn footer_shows_refreshing_while_in_flight() {
-        // The refresh hint becomes "refreshing" (the interval is dropped); the
-        // other hints are untouched.
-        assert_eq!(
-            footer("5m", true, false),
-            "r refreshing - tab switch view - enter open - y copy - / search - ? help"
-        );
-        let styled = footer("5m", true, true);
-        assert!(styled.contains("refreshing"));
-        assert!(!styled.contains("every 5m"));
-        assert!(styled.contains("switch view"));
-        // The `r` glyph is faded (dim) to signal it's disabled, unlike the
-        // bold-accented `r` in the idle footer.
-        let key = status::fg(status::OVERLAY).bold();
-        let dim = Style::new().dimmed();
-        let disabled_r = format!("{}r{}", dim.render(), dim.render_reset());
-        let active_r = format!("{}r{}", key.render(), key.render_reset());
-        assert!(styled.contains(&disabled_r));
-        assert!(!styled.contains(&active_r));
-        assert!(footer("5m", false, true).contains(&active_r));
+    fn compose_scrolls_the_body_to_keep_the_caret_in_view() {
+        let body: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        let body: Vec<&str> = body.iter().map(String::as_str).collect();
+        // 6 rows, one of them the footer, leaves 5 for the body.
+        let five = |caret| screen_rows(&body, &["footer"], 6, caret);
+
+        // With no selection the body starts at the top...
+        assert_eq!(five(None), ["0", "1", "2", "3", "4", "footer"]);
+        // ...a caret past the fold scrolls into view, centered...
+        assert_eq!(five(Some(10)), ["8", "9", "10", "11", "12", "footer"]);
+        // ...and the last row can't scroll past the end of the body.
+        assert_eq!(five(Some(19)), ["15", "16", "17", "18", "19", "footer"]);
     }
 
     #[test]
-    fn tabs_marks_the_active_view() {
-        // Plain: the active view is bracketed.
-        assert_eq!(tabs(View::Mine, false), "[my PRs]  reviews");
-        assert_eq!(tabs(View::Reviews, false), "my PRs  [reviews]");
-        // Styled: the active view carries the accent bar.
-        let styled = tabs(View::Reviews, true);
-        assert!(styled.contains("\u{258c}reviews"));
-        assert!(styled.contains("my PRs"));
+    fn compose_reports_the_rows_cut_from_the_bottom_block() {
+        let (mut b, bh) = buf(&["body"]);
+        let mut at = |rows| {
+            let (mut bot, both) = buf(&["help", "search", "footer"]);
+            let mut screen = TextBuffer::new(8, rows);
+            compose(&mut screen, &mut b, bh, &mut bot, both, rows, None)
+        };
+        // Room for everything: nothing is cut, so a position in the block maps
+        // straight onto `top + y`.
+        assert_eq!(at(5), (2, 0));
+        // Too short: the head goes. The search prompt (block row 1) is still
+        // drawn, now at screen row `top + 1 - cut`.
+        let (top, cut) = at(2);
+        assert_eq!((top, cut), (0, 1));
+        assert_eq!(top + (1 - cut), 0);
+        // Shorter still: only the footer survives and the prompt is gone, which
+        // the caller detects as `y < cut`.
+        let (_, cut) = at(1);
+        assert_eq!(cut, 2);
+        assert!(1 < cut);
+    }
+
+    #[test]
+    fn compose_keeps_the_footer_when_the_bottom_block_overflows() {
+        // Too short for both: the body goes, and the bottom block is cut from
+        // the start so its last lines — down to the footer — stay.
+        assert_eq!(
+            screen_rows(&["a", "b"], &["h1", "h2", "footer"], 2, None),
+            ["h2", "footer"]
+        );
+    }
+
+    #[test]
+    fn compose_never_panics_and_always_keeps_the_footer() {
+        // Degenerate shapes must not panic and must never drop the tail of the
+        // bottom block, where the footer lives.
+        let bodies: [&[&str]; 4] = [&[], &["a"], &["a", "b", "c", "d", "e", "f"], &["x", "", ""]];
+        let bottoms: [&[&str]; 3] = [&[], &["f"], &["h1", "h2", "h3", "f"]];
+        for body in bodies {
+            for bottom in bottoms {
+                for rows in 1..12u16 {
+                    for caret in [None, Some(0), Some(1), Some(5), Some(100)] {
+                        let out = screen_rows(body, bottom, rows, caret);
+                        assert_eq!(out.len(), rows as usize, "{body:?}/{bottom:?}/{rows}");
+                        if let Some(footer) = bottom.last() {
+                            assert!(out.contains(&(*footer).to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn search_prompt_reports_the_caret_and_paints_none() {
+        let mut canvas = TextBuffer::new(40, 1);
+        let (next, caret) = paint_search_prompt(&mut canvas, "café", 1, false, 0);
+        assert_eq!(next, 1);
+        // Just past `/café` — width, not byte length.
+        assert_eq!(caret.x, 5);
+        let mut out = Vec::new();
+        canvas.encode_with(&mut out, Profile::TrueColor).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("/café"));
+        assert!(s.contains("(1 match)"));
+        // No painted stand-in cursor: nothing is reverse-video.
+        assert!(!s.contains("\x1b[7m"));
     }
 
     #[test]
@@ -751,12 +666,11 @@ mod tests {
                 vec![Cell::plain("#42"), Cell::plain("x")],
             ],
         };
-        let out = render_table(&table, false);
-        assert_eq!(
-            out,
-            // "PR " padded to width 3, two-space gap, last column unpadded.
-            "PR   TITLE\n#1   short\n#42  x\n"
-        );
+        let out = encode(20, 3, Profile::Disabled, |b| {
+            paint_table(b, &table, 5, true, 0);
+        });
+        // Header, then two rows; columns line up by display width, no escapes.
+        assert_eq!(out, "PR   TITLE\r\n#1   short\r\n#42  x");
     }
 
     #[test]
@@ -771,15 +685,13 @@ mod tests {
                 vec![Cell::plain("xx"), Cell::plain("#2")],
             ],
         };
-        let out = render_table(&table, false);
-        let lines: Vec<&str> = out.lines().collect();
-        // Display width of everything before the PR column must match across
-        // rows, even though the byte offsets differ (multi-byte glyph).
-        let display_col = |line: &str| {
-            let idx = line.find('#').unwrap();
-            UnicodeWidthStr::width(&line[..idx])
-        };
-        assert_eq!(display_col(lines[1]), display_col(lines[2]));
+        let out = encode(10, 3, Profile::Disabled, |b| {
+            paint_table(b, &table, 0, true, 0);
+        });
+        let lines: Vec<&str> = out.split("\r\n").collect();
+        let col = |line: &str| line.find('#').map_or("", |i| &line[..i]).chars().count();
+        // The "#" starts at the same display column on both rows.
+        assert_eq!(col(lines[1]), col(lines[2]));
     }
 
     #[test]
@@ -788,30 +700,61 @@ mod tests {
             header: vec!["URL"],
             rows: vec![vec![Cell::link("https://x/1", "https://x/1")]],
         };
-        let out = render_table(&table, true);
-        assert!(out.contains("\x1b]8;;https://x/1\x1b\\"));
-        assert!(out.contains(OSC8_END));
-        // dim + underline.
-        assert!(out.contains("\x1b[2m"));
-        assert!(out.contains("\x1b[4m"));
+        let out = encode(12, 2, Profile::TrueColor, |b| {
+            paint_table(b, &table, 0, false, 0);
+        });
+        // OSC-8 framing: the opener carries a per-URL `id=` param, the closer is
+        // empty; dim + underline SGR.
+        assert!(out.contains("\x1b]8;id="));
+        assert!(out.contains(";https://x/1\x1b\\"));
+        assert!(out.contains("\x1b]8;;\x1b\\"));
+        assert!(out.contains("\x1b[2;4m"));
     }
 
     #[test]
-    fn unstyled_url_is_just_text() {
+    fn link_params_is_a_7_hex_char_id() {
+        let p = link_params("https://github.com/o/r/pull/42");
+        let id = p.strip_prefix("id=").expect("id= prefix");
+        assert_eq!(id.len(), 7);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn disabled_profile_drops_styling_and_links() {
         let table = Table {
             header: vec!["URL"],
             rows: vec![vec![Cell::link("https://x/1", "https://x/1")]],
         };
-        let out = render_table(&table, false);
+        let out = encode(12, 2, Profile::Disabled, |b| {
+            paint_table(b, &table, 0, false, 0);
+        });
         assert!(!out.contains('\x1b'));
         assert!(out.contains("https://x/1"));
     }
 
     #[test]
-    fn loading_is_plain_or_dim() {
-        assert_eq!(loading(false), "Loading...");
-        let styled = loading(true);
-        assert!(styled.contains("Loading..."));
+    fn footer_is_plain_or_styled_key_hints() {
+        let plain = encode(80, 1, Profile::Disabled, |b| {
+            paint_footer(b, "5m", false, true, 0);
+        });
+        assert_eq!(
+            plain,
+            "r refresh (every 5m) - tab switch view - enter open - y copy - / search - ? help"
+        );
+
+        // While a refresh is in flight the first hint says so instead.
+        let refreshing = encode(80, 1, Profile::Disabled, |b| {
+            paint_footer(b, "5m", true, true, 0);
+        });
+        assert!(refreshing.starts_with("r refreshing"));
+
+        let styled = encode(80, 1, Profile::TrueColor, |b| {
+            paint_footer(b, "5m", false, false, 0);
+        });
+        assert!(styled.contains("refresh (every 5m)"));
+        assert!(styled.contains("help"));
+        // Bold key accent (combined with the muted color) and a dim label.
+        assert!(styled.contains("\x1b[1;"));
         assert!(styled.contains("\x1b[2m"));
     }
 
@@ -823,9 +766,9 @@ mod tests {
     }
 
     #[test]
-    fn fit_titles_caps_long_title_to_max_width() {
+    fn title_column_is_capped_to_max_width() {
         let long = "x".repeat(200);
-        let mut table = Table {
+        let table = Table {
             header: vec!["", "PR", "TITLE", "BASE"],
             rows: vec![vec![
                 Cell::plain(" "),
@@ -834,164 +777,14 @@ mod tests {
                 Cell::plain("main"),
             ]],
         };
-        fit_titles(&mut [&mut table], false);
-        let out = render_table(&table, false);
-        for line in out.lines() {
-            assert!(w(line) <= MAX_WIDTH, "line exceeds MAX_WIDTH: {}", w(line));
+        let mut canvas = TextBuffer::new(MAX_WIDTH as u16, 2);
+        let tw = title_width(&canvas, &[&table]);
+        paint_table(&mut canvas, &table, tw, false, 0);
+        let out = canvas.display_with(Profile::Disabled).to_string();
+        for line in out.split("\r\n") {
+            assert!(line.chars().count() <= MAX_WIDTH, "line exceeds MAX_WIDTH");
         }
-        assert!(table.rows[0][2].text.ends_with('\u{22ef}'));
-    }
-
-    #[test]
-    fn fit_titles_aligns_title_column_across_tables() {
-        let mut a = Table {
-            header: vec!["PR", "TITLE", "BASE"],
-            rows: vec![vec![
-                Cell::plain("#1"),
-                Cell::plain("a short title"),
-                Cell::plain("main"),
-            ]],
-        };
-        let mut b = Table {
-            header: vec!["PR", "TITLE", "AUTHOR"],
-            rows: vec![vec![Cell::plain("#2"), Cell::plain("x"), Cell::plain("me")]],
-        };
-        fit_titles(&mut [&mut a, &mut b], false);
-        // Both title cells are padded/truncated to one shared display width.
-        assert_eq!(w(&a.rows[0][1].text), w(&b.rows[0][1].text));
-    }
-
-    /// Split a painted frame back into its rows, dropping each row's
-    /// erase-to-end-of-line escape.
-    fn rows_of(screen: &str) -> Vec<&str> {
-        screen
-            .split("\r\n")
-            .map(|l| l.trim_end_matches(ERASE_LINE))
-            .collect()
-    }
-
-    #[test]
-    fn frame_pins_the_bottom_block_to_the_last_rows() {
-        let screen = frame("a\nb\n", "footer", 6, None);
-        // A short body is padded out so the footer lands on the last row.
-        assert_eq!(rows_of(&screen), ["a", "b", "", "", "", "footer"]);
-        // Exactly `rows` lines with no trailing newline, so painting the frame
-        // over the previous one can never scroll the screen.
-        assert!(!screen.ends_with('\n'));
-    }
-
-    #[test]
-    fn frame_scrolls_the_body_to_keep_the_caret_in_view() {
-        let body = (0..20)
-            .map(|i| i.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        // 6 rows, one of them the footer, leaves 5 for the body.
-        let five = |caret| frame(&body, "footer", 6, caret);
-
-        // With no selection the body starts at the top...
-        assert_eq!(rows_of(&five(None)), ["0", "1", "2", "3", "4", "footer"]);
-        // ...a caret past the fold scrolls into view, centered...
-        assert_eq!(
-            rows_of(&five(Some(10))),
-            ["8", "9", "10", "11", "12", "footer"]
-        );
-        // ...and the last row can't scroll past the end of the body.
-        assert_eq!(
-            rows_of(&five(Some(19))),
-            ["15", "16", "17", "18", "19", "footer"]
-        );
-    }
-
-    #[test]
-    fn frame_keeps_the_footer_when_the_bottom_block_overflows() {
-        // Too short for both: the body goes, and the bottom block is cut from
-        // the start so its last lines — down to the footer — stay.
-        assert_eq!(
-            rows_of(&frame("a\nb\n", "h1\nh2\nfooter", 2, None)),
-            ["h2", "footer"]
-        );
-    }
-
-    #[test]
-    fn frame_always_fills_exactly_the_screen() {
-        // Degenerate shapes must not panic, must paint exactly `rows` lines,
-        // must not end with a newline (which would scroll the screen), and must
-        // never drop the tail of the bottom block (where the footer lives).
-        let bodies = ["", "\n", "a", "a\n", "a\nb\nc\nd\ne\nf\ng\nh\n", "x\n\n\n"];
-        let bottoms = ["", "f", "s\nf", "h1\nh2\nh3\nh4\nf"];
-        for body in bodies {
-            for bottom in bottoms {
-                for rows in 0..12usize {
-                    for caret in [None, Some(0), Some(1), Some(5), Some(100)] {
-                        let screen = frame(body, bottom, rows, caret);
-                        if rows == 0 {
-                            assert!(screen.is_empty());
-                            continue;
-                        }
-                        assert_eq!(rows_of(&screen).len(), rows, "{body:?}/{bottom:?}/{rows}");
-                        assert!(!screen.ends_with('\n'));
-                        if let Some(footer) = bottom.lines().next_back() {
-                            assert!(screen.contains(footer), "{body:?}/{bottom:?}/{rows}");
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn caret_line_finds_the_selected_row() {
-        let mut row = [change_marker(false, false)];
-        select_row(&mut row);
-        let selected = render_cell(&row[0], true);
-        // The change marker shares the column but sets no background, so it
-        // can't be mistaken for the selection.
-        let changed = render_cell(&change_marker(true, false), true);
-        let body = format!("head\n{changed} changed\n{selected} selected\ntail");
-        assert_eq!(caret_line(&body), Some(2));
-        assert_eq!(caret_line("nothing selected"), None);
-    }
-
-    #[test]
-    fn visible_width_ignores_escapes() {
-        let cell = render_cell(&Cell::link("#12", "https://pr/12"), true);
-        assert_eq!(visible_width(&cell), 3);
-        assert_eq!(visible_width("plain"), 5);
-    }
-
-    #[test]
-    fn highlight_selected_paints_the_whole_marked_line() {
-        let mut row = [change_marker(true, false), Cell::plain("x")];
-        select_row(&mut row);
-        let marked = format!(
-            "{}{}",
-            render_cell(&row[0], true),
-            render_cell(&row[1], true)
-        );
-        let body = format!("a much longer line\n{marked}\ntail\n");
-        let out = highlight_selected(&body);
-
-        let bg = select_bg();
-        let lines: Vec<&str> = out.split('\n').collect();
-        // Only the marked line is painted, and the trailing newline survives.
-        assert_eq!(lines.len(), 4);
-        assert!(!lines[0].contains(&bg) && !lines[2].contains(&bg));
-        // It is padded out to the widest line in the body, and every reset in it
-        // re-arms the background so no cell punches a hole in the bar.
-        assert_eq!(visible_width(lines[1]), "a much longer line".len());
-        assert!(lines[1].ends_with(RESET));
-        let body_of_line = lines[1].strip_suffix(RESET).unwrap();
-        assert!(
-            body_of_line
-                .split(RESET)
-                .skip(1)
-                .all(|rest| rest.starts_with(&bg))
-        );
-        // A body with no selection comes back untouched.
-        assert_eq!(
-            highlight_selected(&body.replace(&bg, "")),
-            body.replace(&bg, "")
-        );
+        // The title was truncated with the ellipsis.
+        assert!(out.contains('\u{22ef}'));
     }
 }

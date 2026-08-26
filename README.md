@@ -66,14 +66,15 @@ prowl --once              # render once and exit
 ```
 
 While watching, press `r` to refresh now, `Tab` to switch between your PRs and
-your reviews, `?` to toggle the help legend, and `Ctrl-C` to quit. The dashboard
-takes over the alternate screen, so quitting hands your shell back exactly as
-you left it. A footer glued to the bottom of the screen (`r refresh (every 5m) -
-tab switch view - enter open - y copy - / search - ? help`) shows the keys and
-the refresh interval. While a refresh is in flight the
-hint reads `r refreshing` and `r` presses are ignored until it finishes.
-The legend is contextual to the active view: mergeability glyphs and the check /
-thread columns for your PRs, review glyphs for your reviews.
+your reviews, `?` to toggle the help legend, and `q` (or `Ctrl-C`) to quit;
+`Ctrl-Z` suspends it back to your shell. The dashboard takes over the alternate
+screen, so quitting hands your shell back exactly as you left it. A footer glued
+to the bottom of the screen (`r refresh (every 5m) - tab switch view - enter open
+- y copy - / search - ? help`) shows the keys and the refresh interval. While a
+refresh is in flight the hint reads `r refreshing` and `r` presses are ignored
+until it finishes. The sections scroll under the footer, following your
+selection. The legend is contextual to the active view: mergeability glyphs for
+your PRs, review glyphs for your reviews.
 
 Move the selection cursor through the listed PRs and releases with `j`/`k` (or
 `↓`/`↑`), `g`/`G` for the first/last row, and `Ctrl-D`/`Ctrl-U` to jump half a
@@ -96,7 +97,8 @@ that terminal supports it (in tmux, `set -g set-clipboard on`).
 
 Press `/` to search: type to filter the rows live by number, title, author, or
 release tag; `Enter` applies the filter and drops you back to the list (so the
-cursor and `Enter` work on the matches), and `Esc` clears it.
+cursor and `Enter` work on the matches), and `Esc` clears it (with no
+filter to clear, `Esc` quits).
 
 Run `prowl --help` for all flags (interval, `--only`, `--view`,
 `--review-scope`, `--branch`, `--no-draft`, merged window, etc.) and the full

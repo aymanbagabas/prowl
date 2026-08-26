@@ -9,8 +9,8 @@
 use crate::model::PrNode;
 use crate::render::{self, Cell, Table};
 use crate::status::{self, BLUE, Checks, Lamp, Mergeable, PEACH, Status};
-use anstyle::Style;
 use std::collections::HashSet;
+use uncurses::style::Style;
 
 /// Branch names are truncated to this many display columns.
 const BRANCH_WIDTH: usize = 28;
@@ -86,7 +86,7 @@ pub fn without_drafts(mut rows: Vec<PrRow>) -> Vec<PrRow> {
 }
 
 pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>, show_branch: bool) -> Table {
-    let dim = Style::new().dimmed();
+    let dim = Style::new().faint();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let mark = render::change_marker(highlight.contains(&r.number), ascii);
@@ -96,10 +96,14 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>, show_bran
         );
         let merge = Cell::styled(glyph.to_string(), status::fg(color));
         // A draft's number is dimmed; the glyph already reports it as blocked.
-        let pr_style = if r.is_draft { dim } else { status::fg(BLUE) };
-        let pr = Cell::link_styled(format!("#{}", r.number), r.url.clone(), pr_style);
+        let pr_style = if r.is_draft {
+            dim.clone()
+        } else {
+            status::fg(BLUE)
+        };
+        let pr = Cell::pr(r.number, r.url.clone(), &pr_style);
         let threads = if r.unresolved == 0 {
-            Cell::styled("0".to_string(), dim)
+            Cell::styled("0".to_string(), &dim)
         } else {
             let capped = if r.unresolved_capped { "+" } else { "" };
             Cell::styled(
@@ -112,7 +116,7 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>, show_bran
         if show_branch {
             row.push(Cell::styled(
                 render::truncate(&r.branch, BRANCH_WIDTH, ascii),
-                dim,
+                &dim,
             ));
         }
         row.extend([

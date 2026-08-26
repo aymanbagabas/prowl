@@ -6,8 +6,8 @@ use crate::model::MergedNode;
 use crate::render::{self, Cell, Table};
 use crate::status::{self, BLUE};
 use crate::timefmt;
-use anstyle::Style;
 use std::collections::HashSet;
+use uncurses::style::Style;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MergedRow {
@@ -43,20 +43,20 @@ pub fn build_rows(nodes: Vec<MergedNode>, limit: usize, releases: &ReleaseMap) -
 }
 
 pub fn to_table(rows: &[MergedRow], ascii: bool, highlight: &HashSet<i64>) -> Table {
-    let dim = Style::new().dimmed();
+    let dim = Style::new().faint();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         // The release tag links to its release page; an unshipped PR shows a dash.
         let release = match &r.release {
             Some(rr) => Cell::link(rr.tag.clone(), rr.url.clone()),
-            None => Cell::styled("\u{2014}".to_string(), dim),
+            None => Cell::styled("\u{2014}".to_string(), &dim),
         };
         out.push(vec![
             render::change_marker(highlight.contains(&r.number), ascii),
-            Cell::link_styled(format!("#{}", r.number), r.url.clone(), status::fg(BLUE)),
+            Cell::pr(r.number, r.url.clone(), status::fg(BLUE)),
             Cell::plain(r.title.clone()),
             release,
-            Cell::styled(timefmt::age_of(r.merged_at.as_deref()), dim),
+            Cell::styled(timefmt::age_of(r.merged_at.as_deref()), &dim),
         ]);
     }
     Table {
