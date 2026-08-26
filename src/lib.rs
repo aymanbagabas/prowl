@@ -564,6 +564,10 @@ fn staging_buffer(surface: &impl TextSurface, width: u16, height: u16) -> TextBu
         .with_eaw_wide(surface.eaw_wide())
 }
 
+fn ascii_mode(explicit: bool, profile: Profile) -> bool {
+    explicit || profile == Profile::Disabled
+}
+
 /// A safe upper bound on the bottom block's height (search prompt, error line,
 /// footer, help legend, and the blank row between each).
 fn bottom_bound(ui: &Ui) -> u16 {
@@ -675,7 +679,7 @@ fn render_once(
     footer: Option<(&str, bool)>,
 ) -> Result<()> {
     let profile = Profile::detect_from(terminal.env(), terminal.is_terminal().1);
-    let ascii = cli.ascii || profile == Profile::Disabled;
+    let ascii = ascii_mode(cli.ascii, profile);
     // One-shot output has no interaction: no tabs, no selection, no search; the
     // help legend follows `--no-help` instead of the `?` toggle.
     let ui = Ui::once(cli);
@@ -770,6 +774,7 @@ fn run_once_interactive(
     match fetched {
         Some(Ok(sections)) => {
             // Replace the loading frame with the dashboard, then leave it inline.
+            let ascii = ascii_mode(cli.ascii, program.screen().color_profile());
             render_dashboard(
                 program.screen_mut(),
                 &sections,
@@ -777,7 +782,7 @@ fn run_once_interactive(
                 &Changes::default(),
                 "",
                 None,
-                cli.ascii,
+                ascii,
                 false,
             )?;
             program.finish()?;
@@ -1313,6 +1318,7 @@ impl<'a> App<'a> {
         let good = self.last_good.as_ref().unwrap_or(&Sections::EMPTY);
         let mut buf = None;
         let sections = self.ui.shown(good, &mut buf);
+        let ascii = ascii_mode(self.cli.ascii, self.program.screen().color_profile());
         let caret = render_dashboard(
             self.program.screen_mut(),
             sections,
@@ -1320,7 +1326,7 @@ impl<'a> App<'a> {
             changes,
             &self.last_status,
             Some((self.eta.as_str(), self.refreshing)),
-            self.cli.ascii,
+            ascii,
             // Pinning lays the frame out for a screen of a known height, which
             // is only true once we own the alternate screen.
             self.in_alt,
@@ -1742,6 +1748,13 @@ mod tests {
 
         assert_eq!(staged.width_mode(), WidthMode::Grapheme);
         assert!(staged.eaw_wide());
+    }
+
+    #[test]
+    fn disabled_profiles_force_ascii_content() {
+        assert!(ascii_mode(false, Profile::Disabled));
+        assert!(ascii_mode(true, Profile::TrueColor));
+        assert!(!ascii_mode(false, Profile::TrueColor));
     }
 
     /// A `Ui` for the given view with nothing selected and no filter.
