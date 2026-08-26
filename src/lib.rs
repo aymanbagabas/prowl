@@ -56,7 +56,7 @@ use uncurses::color::{Color, Profile};
 use uncurses::event::{Event, KeyCode, KeyModifiers};
 use uncurses::layout::Position;
 use uncurses::program::Program;
-use uncurses::screen::Screen;
+use uncurses::screen::{Optimizations, Screen};
 use uncurses::style::Style;
 use uncurses::terminal::{Stdin, Stdout, Terminal};
 use uncurses::text::{Encode, TextSurface};
@@ -842,6 +842,21 @@ fn staging_buffer(surface: &impl TextSurface, width: u16, height: u16) -> TextBu
 
 fn ascii_mode(explicit: bool, profile: Profile) -> bool {
     explicit || profile == Profile::Disabled
+}
+
+fn resize_fullscreen<W: Write>(screen: &mut Screen<W>, size: (u16, u16)) {
+    screen.resize(size);
+    // Same-cell-size resize reports are normally no-ops. Force a physical
+    // redraw because font/window changes can still move rendered columns.
+    screen.invalidate();
+}
+
+fn without_line_scrolling(optimizations: Optimizations) -> Optimizations {
+    optimizations.difference(
+        Optimizations::CSR
+            .union(Optimizations::SU_SD)
+            .union(Optimizations::IL_DL),
+    )
 }
 
 /// A safe upper bound on the bottom block's height (search prompt, error line,
@@ -1690,6 +1705,8 @@ impl<'a> App<'a> {
             self.program.screen_mut().resize((w, 0));
             self.program.screen_mut().render()?;
             self.program.enter_alt_screen()?;
+            let optimizations = without_line_scrolling(self.program.screen().optimizations());
+            self.program.screen_mut().set_optimizations(optimizations);
             // The one place `autoresize` is the right tool: we now own the
             // whole window, and it is the only call that queries the terminal
             // for its row count — which we need, having just collapsed the
@@ -1932,7 +1949,11 @@ impl<'a> App<'a> {
                 } else {
                     self.program.screen().height()
                 };
-                self.program.screen_mut().resize((w, h));
+                if self.in_alt {
+                    resize_fullscreen(self.program.screen_mut(), (w, h));
+                } else {
+                    self.program.screen_mut().resize((w, h));
+                }
                 self.restore_selection(selected.as_deref());
                 self.repaint_last()?;
                 Flow::Continue
@@ -1965,7 +1986,9 @@ impl<'a> App<'a> {
             SearchAction::Suspend => return self.suspend().map(|()| Flow::Continue),
             // The prompt only opens while watching, so we own the alt screen
             // and the frame is the whole window.
-            SearchAction::Resize(w, h) => self.program.screen_mut().resize((w, h)),
+            SearchAction::Resize(w, h) => {
+                resize_fullscreen(self.program.screen_mut(), (w, h));
+            }
             SearchAction::None => return Ok(Flow::Continue),
         }
         self.repaint_last()?;
@@ -2195,6 +2218,33 @@ mod tests {
 
         assert_eq!(staged.width_mode(), WidthMode::Grapheme);
         assert!(staged.eaw_wide());
+    }
+
+    #[test]
+    fn fullscreen_resize_invalidates_even_at_the_same_size() {
+        let mut screen = Screen::new(Vec::new(), (10, 2));
+        screen.set_fullscreen(true);
+        screen.set_str((0, 0), "old", None);
+        screen.render().unwrap();
+        let first = screen.writer().len();
+
+        resize_fullscreen(&mut screen, (10, 2));
+        screen.render().unwrap();
+
+        assert!(screen.writer().len() > first);
+        let output = String::from_utf8_lossy(screen.writer());
+        assert_eq!(output.matches("old").count(), 2);
+    }
+
+    #[test]
+    fn fullscreen_dashboard_disables_line_scrolling_only() {
+        let original = Optimizations::modern();
+        let dashboard = without_line_scrolling(original);
+
+        assert!(
+            !dashboard.intersects(Optimizations::CSR | Optimizations::SU_SD | Optimizations::IL_DL)
+        );
+        assert!(dashboard.contains(Optimizations::ECH | Optimizations::DCH));
     }
 
     #[test]
