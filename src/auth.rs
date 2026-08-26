@@ -6,8 +6,11 @@
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use std::io::IsTerminal;
 use std::time::{Duration, Instant};
+use uncurses::color::Profile;
 use uncurses::style::Style;
+use uncurses::terminal::ProcessEnv;
 
 /// prowl's GitHub OAuth App client id. Public by design (the device flow needs
 /// no client secret); overridable for testing.
@@ -40,7 +43,7 @@ pub fn token(force_login: bool, interactive: bool) -> Result<String> {
             bail!("not authenticated: run `prowl --login`, or set GITHUB_TOKEN");
         }
     }
-    let token = device_flow(interactive)?;
+    let token = device_flow()?;
     store(&token);
     Ok(token)
 }
@@ -64,17 +67,26 @@ struct TokenResponse {
     error: Option<String>,
 }
 
-fn device_flow(interactive: bool) -> Result<String> {
-    let dc = request_device_code()?;
-    // Always render the URL through a style; on an interactive terminal it also
-    // carries an underlined, clickable OSC-8 hyperlink (emitted by the style).
-    let mut style = Style::new();
-    if interactive {
-        style = style.underline().link(&dc.verification_uri, "");
+fn verification_link(uri: &str, profile: Profile) -> String {
+    if profile == Profile::Disabled {
+        return uri.to_string();
     }
+    let style = Style::new().underline().link(uri, "");
+    format!("{style}{uri}{style:#}")
+}
+
+fn device_flow() -> Result<String> {
+    let dc = request_device_code()?;
+    let stderr = std::io::stderr();
+    let profile = if stderr.is_terminal() {
+        Profile::detect_from(&ProcessEnv, true)
+    } else {
+        Profile::Disabled
+    };
+    let link = verification_link(&dc.verification_uri, profile);
     eprintln!();
     eprintln!("  Authorize prowl:");
-    eprintln!("    1. open {style}{}{style:#}", dc.verification_uri);
+    eprintln!("    1. open {link}");
     eprintln!("    2. enter the code:  {}", dc.user_code);
     eprintln!();
     eprintln!("  Waiting for authorization...");
@@ -199,4 +211,22 @@ fn file_set(token: &str) -> Result<()> {
     #[cfg(not(unix))]
     std::fs::write(&path, token).context("writing token file")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verification_link_is_plain_when_styling_is_disabled() {
+        let uri = "https://github.com/login/device";
+        assert_eq!(verification_link(uri, Profile::Disabled), uri);
+    }
+
+    #[test]
+    fn verification_link_is_styled_when_stderr_supports_it() {
+        let link = verification_link("https://example.com", Profile::Ansi);
+        assert!(link.contains("\x1b["));
+        assert!(link.contains("\x1b]8;"));
+    }
 }

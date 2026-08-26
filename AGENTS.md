@@ -41,7 +41,9 @@ stdout, so the dashboard stays pipe-friendly and URLs can be OSC-8 hyperlinks.
   GraphQL `errors`). REST is `GET /<path>`.
 - **Auth** lives in `auth.rs`: token resolution is `PROWL_TOKEN` → `GITHUB_TOKEN`
   → OS keyring / chmod-600 file → OAuth **device flow** (interactive). The OAuth
-  App client id is public and embedded. `--login` forces the device flow.
+  App client id is public and embedded. `--login` forces the device flow. The
+  device prompt is written to stderr, so its link is styled from stderr's own
+  TTY/profile detection and stays plain when stderr is redirected.
 - **The terminal toolkit is `uncurses`** (the author's own low-level library):
   its `style::Style` carries SGR + the OSC-8 link, `Program` owns raw mode / the
   alternate screen / input / teardown while `Screen` is the renderer it draws
