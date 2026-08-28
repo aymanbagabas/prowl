@@ -191,9 +191,8 @@ pub fn lamp_color(l: Lamp) -> Color {
     }
 }
 
-/// How many check runs sit on each lamp. Counts come straight from GitHub's
-/// rollup aggregates, so they are exact and unpaginated — no phantom
-/// zero-run suites and no truncated page to second-guess.
+/// How many check runs sit on each lamp. Default counts come from GitHub's
+/// rollup aggregates; required-only counts come from every paginated context.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Checks {
     pub fail: u64,

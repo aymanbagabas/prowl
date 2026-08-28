@@ -1,11 +1,14 @@
 //! Typed serde models for the GitHub GraphQL queries, plus the fetch
-//! helpers that run them. Queries are sent verbatim (the merged query's page
-//! size is the only thing we interpolate, so `--merged-limit` is honored).
+//! helpers that run them. Most queries are sent verbatim; the merged query
+//! interpolates its page size, and required-check queries batch one aliased
+//! commit lookup per pull request.
 
 use crate::github::{Client, Repo};
 use crate::status::{self, Checks};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::fmt::Write as _;
 
 // ----------------------------------------------------------------------------
 // Merge queue
@@ -20,6 +23,7 @@ pub const QUEUE_QUERY: &str = r#"query($owner: String!, $name: String!) {
           position
           enqueuedAt
           headCommit {
+            id
             statusCheckRollup {
               contexts(first: 40) {
                 checkRunCountsByState { state count }
@@ -72,10 +76,13 @@ pub struct QueueEntryNode {
     pub head_commit: Option<QueueCommit>,
     #[serde(rename = "pullRequest")]
     pub pull_request: QueuePr,
+    #[serde(skip)]
+    pub(crate) required: Option<RequiredSummary>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct QueueCommit {
+    pub id: String,
     /// Flat rollup of every check on the commit. Preferred over `checkSuites`:
     /// it is a single (cheaper) connection and front-loads the actual check
     /// runs, whereas the first check suites are often app integrations with no
@@ -113,6 +120,9 @@ impl QueueEntryNode {
     /// the queue's own CI semaphore. Empty when the entry has no speculative
     /// commit or no checks yet.
     pub fn checks(&self) -> Checks {
+        if let Some(summary) = &self.required {
+            return summary.checks;
+        }
         let Some(rollup) = self
             .head_commit
             .as_ref()
@@ -132,6 +142,9 @@ impl QueueEntryNode {
     /// dash. RFC 3339 `...Z` timestamps sort lexically == chronologically, so
     /// `min` is earliest.
     pub fn build_started_at(&self) -> Option<String> {
+        if let Some(summary) = &self.required {
+            return summary.build_started_at.clone();
+        }
         self.head_commit
             .as_ref()?
             .status_check_rollup
@@ -180,13 +193,38 @@ pub fn queue_next_eta(data: &QueueData) -> Option<i64> {
 
 /// Fetch the merge-queue entries and the queue-level ETA. A null or empty queue
 /// yields `([], None)`.
-pub fn fetch_queue(client: &Client, repo: &Repo) -> Result<(Vec<QueueEntryNode>, Option<i64>)> {
+pub fn fetch_queue(
+    client: &Client,
+    repo: &Repo,
+    required_only: bool,
+) -> Result<(Vec<QueueEntryNode>, Option<i64>)> {
     let data: QueueData = client.graphql(
         QUEUE_QUERY,
         serde_json::json!({ "owner": repo.owner, "name": repo.name }),
     )?;
     let eta = queue_next_eta(&data);
-    Ok((queue_nodes(data), eta))
+    let mut nodes = queue_nodes(data);
+    if required_only {
+        let (indices, targets): (Vec<_>, Vec<_>) = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| {
+                node.head_commit.as_ref().map(|commit| {
+                    (
+                        index,
+                        RequiredTarget {
+                            pull_request_number: node.pull_request.number,
+                            commit_id: commit.id.clone(),
+                        },
+                    )
+                })
+            })
+            .unzip();
+        for (index, summary) in indices.into_iter().zip(fetch_required(client, targets)?) {
+            nodes[index].required = Some(summary);
+        }
+    }
+    Ok((nodes, eta))
 }
 
 // ----------------------------------------------------------------------------
@@ -200,7 +238,7 @@ pub const MINE_QUERY: &str = r#"query($q: String!) {
         number title url mergeable mergeStateStatus isDraft updatedAt headRefName
         mergeQueueEntry { position state }
         reviewThreads(first: 100) { totalCount nodes { isResolved } }
-        commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 1) {
+        commits(last: 1) { nodes { commit { id statusCheckRollup { contexts(first: 1) {
           checkRunCountsByState { state count }
           statusContextCountsByState { state count }
         } } } } }
@@ -239,6 +277,8 @@ pub struct PrNode {
     #[serde(rename = "reviewThreads")]
     pub review_threads: ReviewThreads,
     pub commits: Commits,
+    #[serde(skip)]
+    pub(crate) required_checks: Option<Checks>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,6 +323,7 @@ pub struct CommitNode {
 
 #[derive(Debug, Deserialize)]
 pub struct Commit {
+    pub id: String,
     /// `null` when the commit has no checks or statuses at all.
     #[serde(rename = "statusCheckRollup")]
     pub status_check_rollup: Option<Rollup>,
@@ -325,6 +366,9 @@ impl PrNode {
     /// The failing / running / passing check counts for the PR's last commit.
     /// Check runs and legacy commit statuses are folded into the same semaphore.
     pub fn checks(&self) -> Checks {
+        if let Some(checks) = self.required_checks {
+            return checks;
+        }
         let Some(rollup) = self
             .commits
             .nodes
@@ -347,10 +391,239 @@ pub fn mine_search(repo: &Repo, me: &str) -> String {
     )
 }
 
-pub fn fetch_my_prs(client: &Client, repo: &Repo, me: &str) -> Result<Vec<PrNode>> {
+pub fn fetch_my_prs(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    required_only: bool,
+) -> Result<Vec<PrNode>> {
     let q = mine_search(repo, me);
     let data: MineData = client.graphql(MINE_QUERY, serde_json::json!({ "q": q }))?;
-    Ok(data.search.nodes)
+    let mut nodes = data.search.nodes;
+    if required_only {
+        let (indices, targets): (Vec<_>, Vec<_>) = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| {
+                node.commits.nodes.first().map(|commit| {
+                    (
+                        index,
+                        RequiredTarget {
+                            pull_request_number: node.number,
+                            commit_id: commit.commit.id.clone(),
+                        },
+                    )
+                })
+            })
+            .unzip();
+        for (index, summary) in indices.into_iter().zip(fetch_required(client, targets)?) {
+            nodes[index].required_checks = Some(summary.checks);
+        }
+    }
+    Ok(nodes)
+}
+
+// ----------------------------------------------------------------------------
+// Required status checks
+// ----------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct RequiredTarget {
+    pull_request_number: i64,
+    commit_id: String,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RequiredSummary {
+    pub(crate) checks: Checks,
+    pub(crate) build_started_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequiredCommit {
+    #[serde(rename = "statusCheckRollup")]
+    status_check_rollup: Option<RequiredRollup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequiredRollup {
+    contexts: RequiredContexts,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequiredContexts {
+    #[serde(rename = "pageInfo")]
+    page_info: RequiredPageInfo,
+    nodes: Vec<RequiredContext>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequiredPageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "__typename")]
+enum RequiredContext {
+    CheckRun {
+        required: bool,
+        status: String,
+        conclusion: Option<String>,
+        #[serde(rename = "startedAt")]
+        started_at: Option<String>,
+    },
+    StatusContext {
+        required: bool,
+        state: String,
+    },
+}
+
+impl RequiredContext {
+    fn add_to(self, summary: &mut RequiredSummary) {
+        match self {
+            RequiredContext::CheckRun {
+                required: true,
+                status,
+                conclusion,
+                started_at,
+            } => {
+                summary.checks.add(
+                    status::check_run_lamp(conclusion.as_deref().unwrap_or(&status)),
+                    1,
+                );
+                if let Some(started_at) = started_at
+                    && summary
+                        .build_started_at
+                        .as_ref()
+                        .is_none_or(|earliest| started_at < *earliest)
+                {
+                    summary.build_started_at = Some(started_at);
+                }
+            }
+            RequiredContext::StatusContext {
+                required: true,
+                state,
+            } => summary.checks.add(status::status_context_lamp(&state), 1),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PendingRequired {
+    target: usize,
+    pull_request_number: i64,
+    commit_id: String,
+    after: Option<String>,
+}
+
+fn required_query(pending: &[PendingRequired]) -> (String, serde_json::Value) {
+    let mut declarations = Vec::with_capacity(pending.len() * 3);
+    let mut fields = String::new();
+    let mut variables = serde_json::Map::new();
+    for (alias, item) in pending.iter().enumerate() {
+        declarations.extend([
+            format!("$commit{alias}: ID!"),
+            format!("$pull{alias}: Int!"),
+            format!("$after{alias}: String"),
+        ]);
+        write!(
+            fields,
+            r#"c{alias}: node(id: $commit{alias}) {{
+  ... on Commit {{
+    statusCheckRollup {{
+      contexts(first: 100, after: $after{alias}) {{
+        pageInfo {{ hasNextPage endCursor }}
+        nodes {{
+          __typename
+          ... on CheckRun {{
+            required: isRequired(pullRequestNumber: $pull{alias})
+            status conclusion startedAt
+          }}
+          ... on StatusContext {{
+            required: isRequired(pullRequestNumber: $pull{alias})
+            state
+          }}
+        }}
+      }}
+    }}
+  }}
+}}
+"#
+        )
+        .expect("writing to a String cannot fail");
+        variables.insert(
+            format!("commit{alias}"),
+            serde_json::Value::String(item.commit_id.clone()),
+        );
+        variables.insert(
+            format!("pull{alias}"),
+            serde_json::Value::from(item.pull_request_number),
+        );
+        variables.insert(
+            format!("after{alias}"),
+            item.after
+                .as_ref()
+                .map_or(serde_json::Value::Null, |value| {
+                    serde_json::Value::String(value.clone())
+                }),
+        );
+    }
+    (
+        format!("query({}) {{\n{fields}}}", declarations.join(", ")),
+        serde_json::Value::Object(variables),
+    )
+}
+
+fn fetch_required(client: &Client, targets: Vec<RequiredTarget>) -> Result<Vec<RequiredSummary>> {
+    let mut summaries: Vec<_> = (0..targets.len())
+        .map(|_| RequiredSummary::default())
+        .collect();
+    let mut pending: Vec<_> = targets
+        .into_iter()
+        .enumerate()
+        .map(|(target, item)| PendingRequired {
+            target,
+            pull_request_number: item.pull_request_number,
+            commit_id: item.commit_id,
+            after: None,
+        })
+        .collect();
+
+    while !pending.is_empty() {
+        let (query, variables) = required_query(&pending);
+        let mut data: HashMap<String, Option<RequiredCommit>> =
+            client.graphql(&query, variables)?;
+        let mut next = Vec::new();
+        for (alias, mut item) in pending.into_iter().enumerate() {
+            let commit = data
+                .remove(&format!("c{alias}"))
+                .with_context(|| format!("required-check response omitted c{alias}"))?
+                .with_context(|| format!("required-check commit c{alias} was unavailable"))?;
+            let Some(rollup) = commit.status_check_rollup else {
+                continue;
+            };
+            for context in rollup.contexts.nodes {
+                context.add_to(&mut summaries[item.target]);
+            }
+            if rollup.contexts.page_info.has_next_page {
+                item.after = Some(
+                    rollup
+                        .contexts
+                        .page_info
+                        .end_cursor
+                        .context("required-check page had no end cursor")?,
+                );
+                next.push(item);
+            }
+        }
+        pending = next;
+    }
+
+    Ok(summaries)
 }
 
 // ----------------------------------------------------------------------------
@@ -557,5 +830,66 @@ mod tests {
         assert!(MINE_QUERY.contains("headRefName"));
         assert!(merged_query(20).contains("headRefName"));
         assert!(REVIEWS_QUERY.contains("headRefName"));
+    }
+
+    #[test]
+    fn required_contexts_count_only_required_checks() {
+        let mut summary = RequiredSummary::default();
+        for context in [
+            RequiredContext::CheckRun {
+                required: true,
+                status: "COMPLETED".to_string(),
+                conclusion: Some("FAILURE".to_string()),
+                started_at: Some("2026-08-28T11:00:00Z".to_string()),
+            },
+            RequiredContext::CheckRun {
+                required: true,
+                status: "IN_PROGRESS".to_string(),
+                conclusion: None,
+                started_at: Some("2026-08-28T10:00:00Z".to_string()),
+            },
+            RequiredContext::CheckRun {
+                required: false,
+                status: "COMPLETED".to_string(),
+                conclusion: Some("SUCCESS".to_string()),
+                started_at: Some("2026-08-28T09:00:00Z".to_string()),
+            },
+            RequiredContext::StatusContext {
+                required: true,
+                state: "SUCCESS".to_string(),
+            },
+        ] {
+            context.add_to(&mut summary);
+        }
+
+        assert_eq!(
+            summary.checks,
+            Checks {
+                fail: 1,
+                running: 1,
+                pass: 1,
+            }
+        );
+        assert_eq!(
+            summary.build_started_at.as_deref(),
+            Some("2026-08-28T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn required_query_uses_commit_id_and_pr_number_variables() {
+        let pending = [PendingRequired {
+            target: 0,
+            pull_request_number: 42,
+            commit_id: "COMMIT_ID".to_string(),
+            after: Some("CURSOR".to_string()),
+        }];
+        let (query, variables) = required_query(&pending);
+
+        assert!(query.contains("isRequired(pullRequestNumber: $pull0)"));
+        assert!(query.contains("contexts(first: 100, after: $after0)"));
+        assert_eq!(variables["commit0"], "COMMIT_ID");
+        assert_eq!(variables["pull0"], 42);
+        assert_eq!(variables["after0"], "CURSOR");
     }
 }

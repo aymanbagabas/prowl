@@ -27,6 +27,7 @@
             "nodes": [
               {
                 "commit": {
+                  "id": "COMMIT_123",
                   "statusCheckRollup": null
                 }
               }

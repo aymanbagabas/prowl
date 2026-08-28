@@ -20,6 +20,7 @@
             "nodes": [
               {
                 "commit": {
+                  "id": "COMMIT_6475",
                   "statusCheckRollup": {
                     "contexts": {
                       "checkRunCountsByState": [
@@ -127,6 +128,7 @@
             "nodes": [
               {
                 "commit": {
+                  "id": "COMMIT_5323",
                   "statusCheckRollup": null
                 }
               }
@@ -151,6 +153,7 @@
             "nodes": [
               {
                 "commit": {
+                  "id": "COMMIT_6656",
                   "statusCheckRollup": {
                     "contexts": {
                       "checkRunCountsByState": [

@@ -69,6 +69,7 @@ watch event loop); everything else is testable modules:
 
 - `cli.rs` — clap derive CLI, `Section` enum, `View` (Mine/Reviews, `--view`,
   `.toggle()`), `ReviewScope` (Direct/All, `--review-scope`, `.qualifier()`),
+  `--required` for required-only CI counts,
   duration parser (`s/m/h/d/w`), and the `WATCH_KEYS` `after_help` block
   documenting the interactive watch-mode keys.
 - `github.rs` — `Client` (HTTP `graphql()`/`get()`), `Repo`, `me()`,
@@ -288,6 +289,9 @@ still performs all teardown through `finish`.
 - **Check counts** come from the rollup's `checkRunCountsByState` /
   `statusContextCountsByState` aggregates, so they're exact and unpaginated —
   no phantom zero-run check suites and no truncated page to compensate for.
+  With `--required`, prowl follows those contexts page by page in a second
+  batched GraphQL query and uses each context's `isRequired(pullRequestNumber:)`
+  value for both the semaphore and the merge queue's BUILD start.
   `STALE` lights no lamp (it neither blocks nor runs).
 - **Status precedence** (the bell key only): `conflicts > fail > running > pass
   > none`.

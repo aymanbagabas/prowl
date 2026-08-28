@@ -9,12 +9,13 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bump when the cached layout changes; older files are then ignored.
-const VERSION: u32 = 10;
+const VERSION: u32 = 11;
 
 /// A loaded cache entry.
 #[derive(Deserialize)]
 pub(crate) struct Cached {
     version: u32,
+    required: bool,
     pub(crate) sections: Sections,
 }
 
@@ -22,6 +23,7 @@ pub(crate) struct Cached {
 #[derive(Serialize)]
 struct CacheRef<'a> {
     version: u32,
+    required: bool,
     saved_at: &'a str,
     sections: &'a Sections,
 }
@@ -42,14 +44,18 @@ fn cache_file(repo: &Repo) -> Option<PathBuf> {
 }
 
 /// Load the cached sections for `repo`, if any (and matching the layout).
-pub(crate) fn load(repo: &Repo) -> Option<Cached> {
+pub(crate) fn load(repo: &Repo, required: bool) -> Option<Cached> {
     let bytes = std::fs::read(cache_file(repo)?).ok()?;
     let cached: Cached = serde_json::from_slice(&bytes).ok()?;
-    (cached.version == VERSION).then_some(cached)
+    compatible(&cached, required).then_some(cached)
+}
+
+fn compatible(cached: &Cached, required: bool) -> bool {
+    cached.version == VERSION && cached.required == required
 }
 
 /// Write the current sections to the cache (best-effort; failures are ignored).
-pub(crate) fn save(repo: &Repo, sections: &Sections) {
+pub(crate) fn save(repo: &Repo, required: bool, sections: &Sections) {
     let Some(path) = cache_file(repo) else {
         return;
     };
@@ -59,6 +65,7 @@ pub(crate) fn save(repo: &Repo, sections: &Sections) {
     let saved_at = timefmt::now_hms();
     let data = CacheRef {
         version: VERSION,
+        required,
         saved_at: &saved_at,
         sections,
     };
@@ -72,5 +79,21 @@ pub(crate) fn save(repo: &Repo, sections: &Sections) {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_mode_must_match_required_flag() {
+        let cached = Cached {
+            version: VERSION,
+            required: true,
+            sections: Sections::EMPTY,
+        };
+        assert!(compatible(&cached, true));
+        assert!(!compatible(&cached, false));
     }
 }

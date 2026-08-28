@@ -157,6 +157,7 @@ mod tests {
             commits: Commits {
                 nodes: vec![CommitNode {
                     commit: Commit {
+                        id: format!("COMMIT_{number}"),
                         status_check_rollup: Some(Rollup {
                             contexts: RollupCounts {
                                 check_runs: runs
@@ -172,6 +173,7 @@ mod tests {
                     },
                 }],
             },
+            required_checks: None,
         }
     }
 
@@ -211,6 +213,27 @@ mod tests {
             }
         );
         assert_eq!(rows[1].status, Some(Status::Conflicts));
+    }
+
+    #[test]
+    fn required_mode_uses_only_required_check_counts() {
+        let mut p = pr(1, "MERGEABLE", "BLOCKED", &[("FAILURE", 2), ("SUCCESS", 8)]);
+        p.required_checks = Some(Checks {
+            fail: 0,
+            running: 1,
+            pass: 2,
+        });
+
+        let rows = build_rows(vec![p]);
+        assert_eq!(
+            rows[0].checks,
+            Checks {
+                fail: 0,
+                running: 1,
+                pass: 2,
+            }
+        );
+        assert_eq!(rows[0].status, Some(Status::Pending));
     }
 
     #[test]

@@ -85,6 +85,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_draft: bool,
 
+    /// Show CI status only for checks required to merge each pull request.
+    #[arg(long)]
+    pub required: bool,
+
     /// Hide the help legend in one-shot/piped output (in the watch view it
     /// starts hidden and is toggled with `?`).
     #[arg(long)]
@@ -259,5 +263,15 @@ mod tests {
             );
         }
         assert!(parse_interval("30s").is_ok());
+    }
+
+    #[test]
+    fn required_checks_are_opt_in() {
+        assert!(!Cli::try_parse_from(["prowl"]).unwrap().required);
+        assert!(
+            Cli::try_parse_from(["prowl", "--required"])
+                .unwrap()
+                .required
+        );
     }
 }

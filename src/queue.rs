@@ -114,7 +114,9 @@ pub fn to_table(rows: &[QueueRow], ascii: bool, show_branch: bool) -> Table {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Login, QueueCommit, QueueContext, QueueContexts, QueuePr, QueueRollup};
+    use crate::model::{
+        Login, QueueCommit, QueueContext, QueueContexts, QueuePr, QueueRollup, RequiredSummary,
+    };
 
     fn node(position: i64, number: i64, login: &str) -> QueueEntryNode {
         QueueEntryNode {
@@ -130,6 +132,7 @@ mod tests {
                     login: login.to_string(),
                 }),
             },
+            required: None,
         }
     }
 
@@ -137,6 +140,7 @@ mod tests {
     /// (`None` = a context with no start, e.g. a legacy status or a queued run).
     fn commit(starts: &[Option<&str>]) -> QueueCommit {
         QueueCommit {
+            id: "COMMIT".to_string(),
             status_check_rollup: Some(QueueRollup {
                 contexts: QueueContexts {
                     check_runs: Vec::new(),
@@ -213,5 +217,33 @@ mod tests {
         assert!(out.contains("WAIT"));
         assert!(out.contains("BUILD"));
         assert!(out.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn required_mode_uses_required_checks_and_build_start() {
+        let mut n = node(1, 1, "caarlos0");
+        n.head_commit = Some(commit(&[Some("2026-08-28T09:00:00Z")]));
+        n.required = Some(RequiredSummary {
+            checks: Checks {
+                fail: 0,
+                running: 1,
+                pass: 2,
+            },
+            build_started_at: Some("2026-08-28T10:00:00Z".to_string()),
+        });
+
+        let rows = build_rows(vec![n], "caarlos0");
+        assert_eq!(
+            rows[0].checks,
+            Checks {
+                fail: 0,
+                running: 1,
+                pass: 2,
+            }
+        );
+        assert_eq!(
+            rows[0].build_started_at.as_deref(),
+            Some("2026-08-28T10:00:00Z")
+        );
     }
 }

@@ -30,6 +30,8 @@ twice.
 
 Merge-queue entries get the same semaphore for their speculative merge commit,
 next to how long they've been queued and how long that build has been running.
+Use `--required` to count only checks required to merge each pull request; in
+the merge queue, `BUILD` then starts at the first required job.
 
 On a TTY prowl uses Nerd Font icons; with `--ascii` (or when piped) the
 mergeability glyph falls back to `y` ready, `n` blocked, `!` conflicts, `?`
@@ -111,5 +113,5 @@ cursor and `Enter` work on the matches), and `Esc` clears it (with no
 filter to clear, `Esc` quits).
 
 Run `prowl --help` for all flags (interval, `--only`, `--view`,
-`--review-scope`, `--branch`, `--no-draft`, merged window, etc.) and the full
+`--review-scope`, `--branch`, `--no-draft`, `--required`, merged window, etc.) and the full
 watch-mode key list.

@@ -9,6 +9,7 @@
               "position": 2,
               "enqueuedAt": "2026-06-19T11:52:00Z",
               "headCommit": {
+                "id": "COMMIT_102",
                 "statusCheckRollup": {
                   "contexts": {
                     "checkRunCountsByState": [
@@ -46,6 +47,7 @@
               "position": 1,
               "enqueuedAt": "2026-06-19T11:50:00Z",
               "headCommit": {
+                "id": "COMMIT_101",
                 "statusCheckRollup": {
                   "contexts": {
                     "checkRunCountsByState": [
@@ -93,6 +95,7 @@
               "position": 3,
               "enqueuedAt": "2026-06-19T11:55:00Z",
               "headCommit": {
+                "id": "COMMIT_103",
                 "statusCheckRollup": {
                   "contexts": {
                     "checkRunCountsByState": [],

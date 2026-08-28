@@ -319,13 +319,13 @@ fn fetch(
         None
     };
     let (queue, queue_next_eta) = if want_mine && cli.show_queue() {
-        let (nodes, eta) = model::fetch_queue(client, repo)?;
+        let (nodes, eta) = model::fetch_queue(client, repo, cli.required)?;
         (Some(queue::build_rows(nodes, me)), eta)
     } else {
         (None, None)
     };
     let prs = if want_mine && cli.show_mine() {
-        let rows = prs::build_rows(model::fetch_my_prs(client, repo, me)?);
+        let rows = prs::build_rows(model::fetch_my_prs(client, repo, me, cli.required)?);
         let rows = if cli.no_draft {
             prs::without_drafts(rows)
         } else {
@@ -1197,7 +1197,7 @@ fn run_once_interactive(
     if let Some(sections) = sections
         && !cli.no_cache
     {
-        cache::save(repo, &sections);
+        cache::save(repo, cli.required, &sections);
     }
     Ok(())
 }
@@ -1561,7 +1561,7 @@ pub fn run() -> Result<()> {
             cli.view == View::Reviews,
         )?;
         if !cli.no_cache {
-            cache::save(&repo, &sections);
+            cache::save(&repo, cli.required, &sections);
         }
         return render_once(&terminal, &sections, &cli, &Changes::default(), None);
     }
@@ -1678,7 +1678,7 @@ impl<'a> App<'a> {
     /// so the first live refresh highlights what changed while prowl was away.
     fn paint_startup(&mut self) -> Result<()> {
         match (!self.cli.no_cache)
-            .then(|| cache::load(self.repo))
+            .then(|| cache::load(self.repo, self.cli.required))
             .flatten()
         {
             Some(c) => {
@@ -2160,7 +2160,7 @@ impl<'a> App<'a> {
         if !self.cli.no_cache
             && let Some(good) = &self.last_good
         {
-            cache::save(self.repo, good);
+            cache::save(self.repo, self.cli.required, good);
         }
         Ok(())
     }
