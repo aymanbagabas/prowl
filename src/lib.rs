@@ -844,13 +844,6 @@ fn ascii_mode(explicit: bool, profile: Profile) -> bool {
     explicit || profile == Profile::Disabled
 }
 
-fn resize_fullscreen<W: Write>(screen: &mut Screen<W>, size: (u16, u16)) {
-    screen.resize(size);
-    // Same-cell-size resize reports are normally no-ops. Force a physical
-    // redraw because font/window changes can still move rendered columns.
-    screen.invalidate();
-}
-
 fn without_line_scrolling(optimizations: Optimizations) -> Optimizations {
     optimizations.difference(
         Optimizations::CSR
@@ -1949,11 +1942,7 @@ impl<'a> App<'a> {
                 } else {
                     self.program.screen().height()
                 };
-                if self.in_alt {
-                    resize_fullscreen(self.program.screen_mut(), (w, h));
-                } else {
-                    self.program.screen_mut().resize((w, h));
-                }
+                self.program.screen_mut().resize((w, h));
                 self.restore_selection(selected.as_deref());
                 self.repaint_last()?;
                 Flow::Continue
@@ -1987,7 +1976,7 @@ impl<'a> App<'a> {
             // The prompt only opens while watching, so we own the alt screen
             // and the frame is the whole window.
             SearchAction::Resize(w, h) => {
-                resize_fullscreen(self.program.screen_mut(), (w, h));
+                self.program.screen_mut().resize((w, h));
             }
             SearchAction::None => return Ok(Flow::Continue),
         }
@@ -2221,14 +2210,17 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_resize_invalidates_even_at_the_same_size() {
+    fn fullscreen_resize_repaints_even_at_the_same_size() {
+        // Pins the uncurses contract this code leans on: an explicit resize
+        // re-establishes the area whatever the size, because a font or window
+        // change can move rendered columns while the cell grid stays put.
         let mut screen = Screen::new(Vec::new(), (10, 2));
         screen.set_fullscreen(true);
         screen.set_str((0, 0), "old", None);
         screen.render().unwrap();
         let first = screen.writer().len();
 
-        resize_fullscreen(&mut screen, (10, 2));
+        screen.resize((10, 2));
         screen.render().unwrap();
 
         assert!(screen.writer().len() > first);
