@@ -56,7 +56,7 @@ use uncurses::color::{Color, Profile};
 use uncurses::event::{Event, KeyCode, KeyModifiers};
 use uncurses::layout::Position;
 use uncurses::program::Program;
-use uncurses::screen::{Optimizations, Screen};
+use uncurses::screen::Screen;
 use uncurses::style::Style;
 use uncurses::terminal::{Stdin, Stdout, Terminal};
 use uncurses::text::{Encode, TextSurface};
@@ -842,14 +842,6 @@ fn staging_buffer(surface: &impl TextSurface, width: u16, height: u16) -> TextBu
 
 fn ascii_mode(explicit: bool, profile: Profile) -> bool {
     explicit || profile == Profile::Disabled
-}
-
-fn without_line_scrolling(optimizations: Optimizations) -> Optimizations {
-    optimizations.difference(
-        Optimizations::CSR
-            .union(Optimizations::SU_SD)
-            .union(Optimizations::IL_DL),
-    )
 }
 
 /// A safe upper bound on the bottom block's height (search prompt, error line,
@@ -1698,8 +1690,6 @@ impl<'a> App<'a> {
             self.program.screen_mut().resize((w, 0));
             self.program.screen_mut().render()?;
             self.program.enter_alt_screen()?;
-            let optimizations = without_line_scrolling(self.program.screen().optimizations());
-            self.program.screen_mut().set_optimizations(optimizations);
             // The one place `autoresize` is the right tool: we now own the
             // whole window, and it is the only call that queries the terminal
             // for its row count — which we need, having just collapsed the
@@ -2226,17 +2216,6 @@ mod tests {
         assert!(screen.writer().len() > first);
         let output = String::from_utf8_lossy(screen.writer());
         assert_eq!(output.matches("old").count(), 2);
-    }
-
-    #[test]
-    fn fullscreen_dashboard_disables_line_scrolling_only() {
-        let original = Optimizations::modern();
-        let dashboard = without_line_scrolling(original);
-
-        assert!(
-            !dashboard.intersects(Optimizations::CSR | Optimizations::SU_SD | Optimizations::IL_DL)
-        );
-        assert!(dashboard.contains(Optimizations::ECH | Optimizations::DCH));
     }
 
     #[test]
