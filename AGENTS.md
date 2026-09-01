@@ -135,7 +135,7 @@ watch event loop); everything else is testable modules:
   caret)` fills exactly `rows` rows — as much of the body as fits at the top,
   blank padding, then the bottom block glued to the last rows — and returns the
   row that block starts on. Before composition, `responsive_layout` hides help,
-  then Mine sections in Shipments → Queue → Merged order (or Reviewed & merged
+  then Mine sections in Shipments → Merged → Queue order (or Reviewed & merged
   in the Reviews view), while protecting the open-PR section. Navigation,
   search counts, open, and copy use the same `Visibility`. If the protected
   section does not fit whole, the frame is replaced by
@@ -377,7 +377,7 @@ still performs all teardown through `finish`.
   `q`/`Q`/`Ctrl-C` quit (as does `Esc` with no filter applied) and `Ctrl-Z`
   suspends/resumes. The bottom block — help legend, search prompt, error line,
   footer — is **pinned** to the last rows of the screen (`render::compose`).
-  Height pressure hides help, then Shipments, Queue, and Merged in the Mine
+  Height pressure hides help, then Shipments, Merged, and Queue in the Mine
   view, or Reviewed & merged in the Reviews view. Open PRs remain whole; if they
   cannot fit, the frame says `Terminal too small — need W×H.` The only persistent
   bottom line is the footer

@@ -249,11 +249,11 @@ fn responsive_layout(
                 if !protect_shipments {
                     visible.shipments = false;
                 }
-                if !fits(visible, show_help) && !protect_queue {
-                    visible.queue = false;
-                }
                 if !fits(visible, show_help) && !protect_merged {
                     visible.merged = false;
+                }
+                if !fits(visible, show_help) && !protect_queue {
+                    visible.queue = false;
                 }
             }
             View::Reviews => {
@@ -2371,6 +2371,31 @@ mod tests {
             commits: Some(commits::CommitStats::unavailable()),
             ..Sections::EMPTY
         };
+        // After shipments, merged PRs disappear while the merge queue remains.
+        let layout = responsive_layout(
+            120,
+            9,
+            &sections,
+            &ui(View::Mine),
+            "",
+            Some(("5m", false)),
+            true,
+            true,
+        );
+        assert_eq!(
+            layout.visible,
+            Visibility {
+                prs: true,
+                queue: true,
+                merged: false,
+                shipments: false,
+                reviews: false,
+                reviewed_merged: false,
+            }
+        );
+        assert!(layout.constrained);
+        assert!(!layout.too_small);
+
         // Tabs + the empty open-PR section + footer fit exactly.
         let layout = responsive_layout(
             120,
