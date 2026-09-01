@@ -80,8 +80,10 @@ to the bottom of the screen (`r refresh (every 5m) - tab switch view - enter ope
 refresh is in flight the hint reads `r refreshing` and `r` presses are ignored
 until it finishes. On narrow screens the footer removes low-priority labels and
 hints instead of clipping. When height is limited, prowl first hides the help legend,
-then lower-priority sections. In the PR view it hides shipments, the merge
-merged PRs, and then the merge queue; in the reviews view it hides
+then lower-priority sections. In the PR view it hides shipments, then trims the
+merged list from the oldest rows down to the newest row plus a `+N hidden`
+line. The merge queue next narrows to building and own PRs, then building PRs,
+each with a hidden count, before disappearing. In the reviews view it hides
 reviewed-and-merged PRs. The open PR section is always kept whole. If that
 section or the minimum useful columns do not fit, prowl shows
 `Terminal too small` with the minimum required dimensions. The legend is contextual to the active view:

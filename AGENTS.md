@@ -129,9 +129,11 @@ watch event loop); everything else is testable modules:
   caret)` fills exactly `rows` rows — as much of the body as fits at the top,
   blank padding, then the bottom block glued to the last rows — and returns the
   row that block starts on. Before composition, `responsive_layout` hides help,
-  then Mine sections in Shipments → Merged → Queue order (or Reviewed & merged
-  in the Reviews view), while protecting the open-PR section. Navigation,
-  search counts, open, and copy use the same `Visibility`. If the protected
+  then Shipments; progressively trims Merged to the newest row; narrows Queue
+  to building + own rows, then building rows; and finally hides each section.
+  Each partial section ends with `+N hidden`. The Reviews view still hides
+  Reviewed & merged as one section. Navigation, search counts, open, and copy
+  use the same `Visibility`, including its row limits. If the protected open-PR
   section does not fit whole, the frame is replaced by
   `Terminal too small — need W×H.`
   The body is drawn through
@@ -190,8 +192,8 @@ watch event loop); everything else is testable modules:
   (same per-row haystack — number/title/author/tag — so rows and targets stay in
   lockstep), `moved` advances the selection cursor by a `nav::Move` (the
   input-agnostic movement type — `lib.rs::classify` maps keys onto it; lazy:
-  `None` until the first move, `Bottom` enters at the last row), and `clamp`
-  keeps it in range after a refresh.
+  `None` until the first move, `Bottom` enters at the last row). Refreshes and
+  resizes restore the same selected URL when it remains visible.
 - `open.rs` — `open::url` opens a URL in the default browser via the platform
   opener (`open` / `xdg-open` / `cmd /C start`), spawned detached; rejects
   non-`http(s)` URLs; no new dep.
@@ -330,7 +332,8 @@ still performs all teardown through `finish`.
   visible and clears selection when responsive hiding removes it. Every row
   across all sections of the active view is one
   target (`nav::targets_visible`, in render order); switching views drops the cursor and
-  a refresh `clamp`s it. `--once`/piped output has no selection.
+  a refresh preserves its URL when that row remains visible. `--once`/piped
+  output has no selection.
 - **Copy:** `y` copies the selected row's link, `Y` every link of the section the
   cursor is in (`nav::section_at_visible`) as a markdown list (`- <url>` per line, no
   trailing newline). Both honor the active search filter, so `Y` copies only the
@@ -371,9 +374,11 @@ still performs all teardown through `finish`.
   `q`/`Q`/`Ctrl-C` quit (as does `Esc` with no filter applied) and `Ctrl-Z`
   suspends/resumes. The bottom block — help legend, search prompt, error line,
   footer — is **pinned** to the last rows of the screen (`render::compose`).
-  Height pressure hides help, then Shipments, Merged, and Queue in the Mine
-  view, or Reviewed & merged in the Reviews view. Open PRs remain whole; if they
-  cannot fit, the frame says `Terminal too small — need W×H.` The only persistent
+  Height pressure hides help and Shipments, trims Merged oldest-first to one
+  row, then narrows Queue to building + own rows and building-only before hiding
+  it. Partial sections show `+N hidden`. The Reviews view hides Reviewed & merged
+  as one section. Open PRs remain whole; if they cannot fit, the frame says
+  `Terminal too small — need W×H.` The only persistent
   bottom line is the footer
   (`r refresh (every 5m) - tab switch view - enter open - y copy - / search - ?
   help`), which carries the refresh interval and progressively removes

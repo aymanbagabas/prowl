@@ -102,8 +102,8 @@ impl Sections {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Visibility {
     pub(crate) prs: bool,
-    pub(crate) queue: bool,
-    pub(crate) merged: bool,
+    pub(crate) queue: Option<queue::VisibleRows>,
+    pub(crate) merged: Option<usize>,
     pub(crate) shipments: bool,
     pub(crate) reviews: bool,
     pub(crate) reviewed_merged: bool,
@@ -113,8 +113,8 @@ impl Visibility {
     pub(crate) fn all(sections: &Sections) -> Self {
         Self {
             prs: sections.prs.is_some(),
-            queue: sections.queue.is_some(),
-            merged: sections.merged.is_some(),
+            queue: sections.queue.as_ref().map(|_| queue::VisibleRows::All),
+            merged: sections.merged.as_ref().map(Vec::len),
             shipments: sections.commits.is_some(),
             reviews: sections.reviews.is_some(),
             reviewed_merged: sections.reviewed_merged.is_some(),
@@ -124,8 +124,8 @@ impl Visibility {
     fn none() -> Self {
         Self {
             prs: false,
-            queue: false,
-            merged: false,
+            queue: None,
+            merged: None,
             shipments: false,
             reviews: false,
             reviewed_merged: false,
@@ -150,13 +150,23 @@ fn section_height<T>(rows: Option<&[T]>, visible: bool) -> usize {
     }
 }
 
+fn limited_section_height(total: usize, shown: Option<usize>) -> usize {
+    shown.map_or(0, |shown| {
+        if shown == 0 {
+            3
+        } else {
+            shown + 3 + usize::from(shown < total)
+        }
+    })
+}
+
 fn body_height(sections: &Sections, view: View, visible: Visibility, tabs: bool) -> usize {
     let top = usize::from(tabs) * 2;
     top + match view {
         View::Mine => {
             let prs = if visible.prs {
                 sections.prs.as_ref().map_or(0, |rows| {
-                    if visible.queue {
+                    if visible.queue.is_some() {
                         rows.iter().filter(|row| row.queue.is_none()).count()
                     } else {
                         rows.len()
@@ -165,8 +175,15 @@ fn body_height(sections: &Sections, view: View, visible: Visibility, tabs: bool)
             } else {
                 0
             };
-            prs + section_height(sections.queue.as_deref(), visible.queue)
-                + section_height(sections.merged.as_deref(), visible.merged)
+            let queue = sections.queue.as_deref().map_or(0, |rows| {
+                limited_section_height(rows.len(), visible.queue.map(|mode| mode.count(rows)))
+            });
+            let merged = sections
+                .merged
+                .as_deref()
+                .map_or(0, |rows| limited_section_height(rows.len(), visible.merged));
+            prs + queue
+                + merged
                 + if visible.shipments {
                     sections.commits.as_ref().map_or(0, |stats| {
                         if stats.available {
@@ -243,17 +260,43 @@ fn responsive_layout(
     if !fits(visible, show_help) {
         match ui.view {
             View::Mine => {
-                let protect_queue = !all.prs && all.queue;
-                let protect_merged = !all.prs && !all.queue && all.merged;
-                let protect_shipments = !all.prs && !all.queue && !all.merged;
+                let protect_shipments = !all.prs && all.queue.is_none() && all.merged.is_none();
                 if !protect_shipments {
                     visible.shipments = false;
                 }
-                if !fits(visible, show_help) && !protect_merged {
-                    visible.merged = false;
+                if !fits(visible, show_help)
+                    && let Some(shown) = visible.merged
+                {
+                    for keep in (1..shown).rev() {
+                        visible.merged = Some(keep);
+                        if fits(visible, show_help) {
+                            break;
+                        }
+                    }
+                    if !fits(visible, show_help) {
+                        visible.merged = None;
+                    }
                 }
-                if !fits(visible, show_help) && !protect_queue {
-                    visible.queue = false;
+                if !fits(visible, show_help)
+                    && let (Some(rows), Some(_)) = (sections.queue.as_deref(), visible.queue)
+                {
+                    let mut count = rows.len();
+                    for mode in [
+                        queue::VisibleRows::BuildingAndMine,
+                        queue::VisibleRows::Building,
+                    ] {
+                        let next = mode.count(rows);
+                        if next < count {
+                            visible.queue = Some(mode);
+                            count = next;
+                            if fits(visible, show_help) {
+                                break;
+                            }
+                        }
+                    }
+                    if !fits(visible, show_help) {
+                        visible.queue = None;
+                    }
                 }
             }
             View::Reviews => {
@@ -367,14 +410,16 @@ fn fetch(
 }
 
 /// Paint one PR section onto `s` at row `top`: a counted header (with an optional
-/// dim note), then either its table or, when empty, a dim placeholder, then a
-/// trailing blank row. Returns the next free row.
+/// dim note), then either its table or, when empty, a dim placeholder. A partial
+/// section adds a dim `+N hidden` row before the trailing blank. Returns the next
+/// free row.
 #[allow(clippy::too_many_arguments)]
 fn paint_section(
     s: &mut impl TextSurface,
     title: &str,
     accent: Color,
     count: usize,
+    hidden: usize,
     note: Option<&str>,
     empty_msg: &str,
     table: Option<&render::Table>,
@@ -383,9 +428,15 @@ fn paint_section(
     top: u16,
 ) -> u16 {
     let y = render::paint_header(s, title, accent, Some(&count.to_string()), note, ascii, top);
-    let y = match table {
-        Some(table) => render::paint_table_aligned(s, table, alignment, ascii, y),
-        None => render::paint_dim_at(s, empty_msg, render::ROW_INDENT, y),
+    let y = match (table, hidden) {
+        (Some(table), _) => render::paint_table_aligned(s, table, alignment, ascii, y),
+        (None, 0) => render::paint_dim_at(s, empty_msg, render::ROW_INDENT, y),
+        (None, _) => y,
+    };
+    let y = if hidden > 0 {
+        render::paint_dim_at(s, &format!("+{hidden} hidden"), render::ROW_INDENT, y)
+    } else {
+        y
     };
     y + 1
 }
@@ -441,9 +492,10 @@ fn mine_selection(
 }
 
 /// The Mine view: My open PRs, Merge Queue, My merged PRs, then My Shipments.
-/// Each section always shows its header (with a count); an empty section follows
-/// it with a dim placeholder. Returns the next free row and the row the selection
-/// caret landed on, if any.
+/// Each visible section shows its header (with the full count); an empty section
+/// follows it with a dim placeholder, and a partial section ends with a hidden
+/// count. Returns the next free row and the row the selection caret landed on,
+/// if any.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn paint_mine(
     s: &mut impl TextSurface,
@@ -456,7 +508,7 @@ fn paint_mine(
     top: u16,
 ) -> (u16, Option<u16>, bool, u16) {
     let prs_rows = sections.prs.as_deref().filter(|_| visible.prs).map(|rows| {
-        if visible.queue {
+        if visible.queue.is_some() {
             Cow::Owned(prs::without_queued(rows.to_vec()))
         } else {
             Cow::Borrowed(rows)
@@ -466,16 +518,27 @@ fn paint_mine(
         .as_deref()
         .filter(|r| !r.is_empty())
         .map(|rows| prs::to_table(rows, ascii, &changes.status_changed, show_branch));
-    let queue_table = sections
+    let queue_rows = sections
         .queue
-        .as_ref()
-        .filter(|_| visible.queue)
+        .as_deref()
+        .zip(visible.queue)
+        .map(|(rows, mode)| {
+            if mode == queue::VisibleRows::All {
+                Cow::Borrowed(rows)
+            } else {
+                Cow::Owned(mode.iter(rows).cloned().collect())
+            }
+        });
+    let queue_table = queue_rows
+        .as_deref()
         .filter(|r| !r.is_empty())
         .map(|rows| queue::to_table(rows, ascii, show_branch));
-    let merged_table = sections
+    let merged_rows = sections
         .merged
-        .as_ref()
-        .filter(|_| visible.merged)
+        .as_deref()
+        .zip(visible.merged)
+        .map(|(rows, shown)| &rows[..shown.min(rows.len())]);
+    let merged_table = merged_rows
         .filter(|r| !r.is_empty())
         .map(|rows| merged::to_table(rows, ascii, &changes.newly_merged, show_branch));
     let tables: Vec<&render::Table> = [&prs_table, &queue_table, &merged_table]
@@ -488,16 +551,8 @@ fn paint_mine(
     }
 
     let np = prs_rows.as_deref().map_or(0, <[prs::PrRow]>::len);
-    let nq = if visible.queue {
-        sections.queue.as_ref().map_or(0, Vec::len)
-    } else {
-        0
-    };
-    let nm = if visible.merged {
-        sections.merged.as_ref().map_or(0, Vec::len)
-    } else {
-        0
-    };
+    let nq = queue_rows.as_deref().map_or(0, <[queue::QueueRow]>::len);
+    let nm = merged_rows.map_or(0, <[merged::MergedRow]>::len);
     let (prs_sel, queue_sel, merged_sel, ship_sel) = mine_selection(selected, np, nq, nm);
     let prs_sel = prs_sel.filter(|&local| selects_row(prs_table.as_ref(), local));
     let queue_sel = queue_sel.filter(|&local| selects_row(queue_table.as_ref(), local));
@@ -512,6 +567,7 @@ fn paint_mine(
             "My open PRs",
             status::GREEN,
             rows.len(),
+            0,
             None,
             "No open PRs.",
             prs_table.as_ref(),
@@ -520,9 +576,7 @@ fn paint_mine(
             y,
         );
     }
-    if visible.queue
-        && let Some(rows) = &sections.queue
-    {
+    if let (Some(rows), Some(shown)) = (&sections.queue, queue_rows.as_deref()) {
         // The queue-level ETA (time until a newly added entry would merge) rides
         // alongside the header as a dim note.
         caret = caret.or(queue_sel.map(|l| caret_row(y, l)));
@@ -537,6 +591,7 @@ fn paint_mine(
             "Merge Queue",
             status::PEACH,
             rows.len(),
+            rows.len() - shown.len(),
             eta.as_deref(),
             "No merge queue.",
             queue_table.as_ref(),
@@ -545,15 +600,14 @@ fn paint_mine(
             y,
         );
     }
-    if visible.merged
-        && let Some(rows) = &sections.merged
-    {
+    if let (Some(rows), Some(shown)) = (&sections.merged, merged_rows) {
         caret = caret.or(merged_sel.map(|l| caret_row(y, l)));
         y = paint_section(
             s,
             "My merged PRs",
             status::MAUVE,
             rows.len(),
+            rows.len() - shown.len(),
             None,
             "No recent merged PRs.",
             merged_table.as_ref(),
@@ -630,6 +684,7 @@ fn paint_reviews(
             "Reviews",
             status::LAVENDER,
             rows.len(),
+            0,
             None,
             "No PRs to review.",
             open_table.as_ref(),
@@ -647,6 +702,7 @@ fn paint_reviews(
             "Reviewed & merged",
             status::MAUVE,
             rows.len(),
+            0,
             None,
             "No reviewed PRs merged recently.",
             merged_table.as_ref(),
@@ -1480,7 +1536,7 @@ pub struct Ui {
     pub show_help: bool,
     /// Navigation cursor into the active view's (filtered) rows — lazy (`None`
     /// until the user moves it), reset when switching views or changing the
-    /// search, clamped when a refresh shrinks the list.
+    /// search, and restored by URL after a refresh or resize.
     pub selected: Option<usize>,
     /// The active search query; empty means no filter is applied.
     pub search: String,
@@ -2019,10 +2075,6 @@ impl<'a> App<'a> {
         nav::targets_visible(self.ui.view, shown, &self.ui.search, visible).len()
     }
 
-    fn clamp_selection(&mut self) {
-        self.ui.selected = nav::clamp(self.ui.selected, self.target_count());
-    }
-
     fn visible_sections(&self, sections: &Sections) -> Visibility {
         responsive_layout(
             self.program.screen().width().max(1),
@@ -2133,6 +2185,7 @@ impl<'a> App<'a> {
     /// Render a successful fetch: diff against the previous snapshot, paint, ring
     /// the bell on a change (once armed), and cache the result.
     fn apply(&mut self, sections: Sections) -> Result<()> {
+        let selected = self.selected_url();
         let tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
         let changes = self
             .prev
@@ -2144,9 +2197,9 @@ impl<'a> App<'a> {
         self.last_status.clear();
         self.prev = Some(tracker);
         self.last_good = Some(sections);
-        // The refreshed (and filtered) list may be shorter than before; keep the
-        // cursor in range (or drop it if it emptied).
-        self.clamp_selection();
+        // Responsive queue membership can change as checks start or finish.
+        // Keep the same URL selected instead of reusing its old numeric index.
+        self.restore_selection(selected.as_deref());
         self.enter_alt()?;
         self.redraw(&changes)?;
 
@@ -2274,6 +2327,82 @@ mod tests {
         }
     }
 
+    fn queue_row(n: i64, mine: bool, building: bool) -> queue::QueueRow {
+        queue::QueueRow {
+            position: n,
+            number: n,
+            author: if mine { "me" } else { "other" }.into(),
+            title: format!("queue-{n}"),
+            branch: String::new(),
+            url: format!("https://queue/{n}"),
+            mine,
+            enqueued_at: None,
+            build_started_at: None,
+            checks: status::Checks {
+                running: u64::from(building),
+                ..status::Checks::default()
+            },
+        }
+    }
+
+    fn queued_open_row(n: i64) -> prs::PrRow {
+        prs::PrRow {
+            number: n,
+            is_draft: false,
+            title: format!("open-queued-{n}"),
+            branch: String::new(),
+            mergeable: status::Mergeable::Ready,
+            status: None,
+            checks: status::Checks::default(),
+            unresolved: 0,
+            unresolved_capped: false,
+            queue: Some((n, "QUEUED".into())),
+            url: format!("https://open/{n}"),
+            updated_at: None,
+        }
+    }
+
+    fn merged_row(n: i64) -> merged::MergedRow {
+        merged::MergedRow {
+            number: n,
+            title: format!("merged-{n}"),
+            branch: String::new(),
+            url: format!("https://merged/{n}"),
+            release: None,
+            merged_at: None,
+        }
+    }
+
+    fn visible_body(sections: &Sections, visible: Visibility) -> String {
+        let mut canvas = TextBuffer::new(render::OUTPUT_WIDTH as u16, 64);
+        let (used, _, _, required_width) = paint_body(
+            &mut canvas,
+            sections,
+            &ui(View::Mine),
+            &Changes::default(),
+            true,
+            true,
+            visible,
+            0,
+        );
+        assert!(required_width <= render::OUTPUT_WIDTH as u16);
+        canvas.resize(render::OUTPUT_WIDTH as u16, used.max(1));
+        canvas.display_with(Profile::Disabled).to_string()
+    }
+
+    fn mine_layout(sections: &Sections, rows: u16) -> ResponsiveLayout {
+        responsive_layout(
+            120,
+            rows,
+            sections,
+            &ui(View::Mine),
+            "",
+            Some(("5m", false)),
+            true,
+            true,
+        )
+    }
+
     #[test]
     fn empty_sections_still_show_their_headers_then_a_placeholder() {
         let sections = Sections {
@@ -2383,8 +2512,8 @@ mod tests {
             layout.visible,
             Visibility {
                 prs: true,
-                queue: true,
-                merged: false,
+                queue: Some(queue::VisibleRows::All),
+                merged: None,
                 shipments: false,
                 reviews: false,
                 reviewed_merged: false,
@@ -2408,8 +2537,8 @@ mod tests {
             layout.visible,
             Visibility {
                 prs: true,
-                queue: false,
-                merged: false,
+                queue: None,
+                merged: None,
                 shipments: false,
                 reviews: false,
                 reviewed_merged: false,
@@ -2417,6 +2546,97 @@ mod tests {
         );
         assert!(layout.constrained);
         assert!(!layout.too_small);
+    }
+
+    #[test]
+    fn responsive_height_trims_merged_rows_to_one_before_hiding_them() {
+        let sections = Sections {
+            prs: Some(vec![]),
+            merged: Some((1..=5).map(merged_row).collect()),
+            ..Sections::EMPTY
+        };
+
+        let three = mine_layout(&sections, 13);
+        assert_eq!(three.visible.merged, Some(3));
+
+        let one = mine_layout(&sections, 11);
+        assert_eq!(one.visible.merged, Some(1));
+        let body = visible_body(&sections, one.visible);
+        assert!(body.contains("merged-1"), "newest merged PR should remain");
+        assert!(
+            !body.contains("merged-2"),
+            "older merged PR should be hidden"
+        );
+        assert!(body.contains("+4 hidden"), "hidden count should be shown");
+
+        let none = mine_layout(&sections, 10);
+        assert_eq!(none.visible.merged, None);
+    }
+
+    #[test]
+    fn responsive_height_prioritizes_building_and_mine_queue_rows() {
+        let sections = Sections {
+            prs: Some(vec![]),
+            queue: Some(vec![
+                queue_row(1, false, true),
+                queue_row(2, true, false),
+                queue_row(3, true, true),
+                queue_row(4, false, false),
+                queue_row(5, false, false),
+            ]),
+            ..Sections::EMPTY
+        };
+
+        let mine_and_building = mine_layout(&sections, 13);
+        assert_eq!(
+            mine_and_building.visible.queue,
+            Some(queue::VisibleRows::BuildingAndMine)
+        );
+        let body = visible_body(&sections, mine_and_building.visible);
+        for title in ["queue-1", "queue-2", "queue-3"] {
+            assert!(body.contains(title), "{title} should be visible");
+        }
+        for title in ["queue-4", "queue-5"] {
+            assert!(!body.contains(title), "{title} should be hidden");
+        }
+        assert!(body.contains("+2 hidden"), "hidden count should be shown");
+
+        let building = mine_layout(&sections, 12);
+        assert_eq!(building.visible.queue, Some(queue::VisibleRows::Building));
+        let body = visible_body(&sections, building.visible);
+        for title in ["queue-1", "queue-3"] {
+            assert!(body.contains(title), "{title} should be visible");
+        }
+        assert!(
+            !body.contains("queue-2"),
+            "non-building own PR should be hidden"
+        );
+        assert!(body.contains("+3 hidden"), "hidden count should be shown");
+
+        let none = mine_layout(&sections, 11);
+        assert_eq!(none.visible.queue, None);
+    }
+
+    #[test]
+    fn responsive_height_keeps_marker_only_queue_before_hiding_it() {
+        let sections = Sections {
+            prs: Some((1..=4).map(queued_open_row).collect()),
+            queue: Some((1..=4).map(|n| queue_row(n, true, false)).collect()),
+            ..Sections::EMPTY
+        };
+        let layout = mine_layout(&sections, 9);
+
+        assert_eq!(layout.visible.queue, Some(queue::VisibleRows::Building));
+        assert!(!layout.too_small);
+        let body = visible_body(&sections, layout.visible);
+        assert!(body.contains("Merge Queue (4)"));
+        assert!(body.contains("+4 hidden"));
+        assert!(!body.contains("No merge queue."));
+        assert!(!body.contains("open-queued-"));
+        assert!(
+            nav::targets_visible(View::Mine, &sections, "", layout.visible).is_empty(),
+            "the hidden-count row must not be navigable or copyable"
+        );
     }
 
     #[test]
@@ -2474,7 +2694,7 @@ mod tests {
             true,
         );
         assert!(layout.visible.prs);
-        assert!(!layout.visible.queue);
+        assert!(layout.visible.queue.is_none());
         assert!(!layout.too_small);
         assert_eq!(body_height(&sections, View::Mine, layout.visible, true), 6);
     }
