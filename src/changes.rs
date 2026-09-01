@@ -143,9 +143,7 @@ mod tests {
 
     #[test]
     fn first_refresh_is_silent() {
-        let cur = Tracker::build(Some(&[pr(1, Some(Status::Fail))]), Some(&[merged(2)]));
         // No previous tracker -> default Changes -> nothing rings.
         assert!(!Changes::default().any());
-        let _ = cur;
     }
 }

@@ -1589,7 +1589,7 @@ pub fn run() -> Result<()> {
 /// The interactive watch, following the uncurses example `App` pattern: it owns
 /// the `Screen` and all dashboard state. `start` brings the terminal up, `run`
 /// drives the refresh + event loop (returning `Ok(())` when a quit key is
-/// pressed), and `stop` tears it back down with `Screen::finish`. The caller
+/// pressed), and `stop` tears it back down with `Program::finish`. The caller
 /// always calls `stop`, so the terminal is restored on every path.
 struct App<'a> {
     program: Program<Stdin, Stdout>,
@@ -1767,7 +1767,7 @@ impl<'a> App<'a> {
         }
     }
 
-    /// Tear the terminal back down. The consuming `Screen::finish` is the
+    /// Tear the terminal back down. The consuming `Program::finish` is the
     /// idiomatic teardown: it exits the alternate screen, shows the cursor, and
     /// leaves raw mode.
     fn stop(self) -> Result<()> {
@@ -2085,16 +2085,13 @@ impl<'a> App<'a> {
         let mut filtered = None;
         let shown = self.ui.shown(good, &mut filtered);
         let visible = self.visible_sections(shown);
-        let urls: Vec<String> = nav::section_at_visible(
+        let urls = nav::section_at_visible(
             self.ui.view,
             shown,
             &self.ui.search,
             self.ui.selected.unwrap_or_default(),
             visible,
-        )
-        .iter()
-        .map(|u| (*u).to_string())
-        .collect();
+        );
         if urls.is_empty() {
             return Ok(());
         }

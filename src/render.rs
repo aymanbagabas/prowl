@@ -743,9 +743,8 @@ fn legend_row(
 
 /// Paint the help legend for `view` at row `top`: the navigation keys, then only
 /// the glyphs and values that view actually uses, so a glyph the other view
-/// reuses for something else can't muddy it. The Mine view lists the status
-/// glyphs + every `mergeStateStatus` value; the Reviews view lists the
-/// review-state glyphs + the merged glyph (its only shared icon). Painted above
+/// reuses for something else can't muddy it. The Mine view lists mergeability
+/// glyphs; the Reviews view lists review-state glyphs. Painted above
 /// the search prompt / footer, since it documents the keys they list. Returns
 /// the next free row.
 pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -> u16 {

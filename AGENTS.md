@@ -91,12 +91,6 @@ watch event loop); everything else is testable modules:
   `review_style`/`review_glyph`/`review_ascii`/`review_meaning` and
   `REVIEW_ORDER`. Colors are `uncurses::color::Color` constants and `fg(Color)`
   builds the foreground `Style`.
-- `status.rs` — **the** palette: `Status`, `status_style` (returns a glyph +
-  `Color`), glyphs/ASCII, `derive_status` (precedence), `fail_count`; the
-  `mergeStateStatus` helpers `state_style`, `state_label` (DIRTY → CONFLICTS),
-  `state_glyph`, `state_meaning`; and the Reviews-view `ReviewState` (Awaiting/
-  ReReview/Updated/Reviewed) with `review_style`/`review_glyph`/`review_ascii`/
-  `review_meaning` and `REVIEW_ORDER`. `fg(Color)` builds the foreground `Style`.
 - `render.rs` — the surface painters: `paint_table`/`paint_header`/`paint_dim`/
   `paint_footer`/`paint_tabs`/`paint_search_prompt`/`paint_help` write onto any
   `&mut impl TextSurface` using the surface's own `str_width` (no in-house width

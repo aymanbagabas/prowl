@@ -120,14 +120,14 @@ fn queue_build_time_is_earliest_check_run_start() {
     let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
     let rows = queue::build_rows(queue_nodes(data), "caarlos0");
 
-    // #101 (pos 1): earliest check-run start across its suites (ignoring the
+    // #101 (pos 1): earliest check-run start across its contexts (ignoring the
     // empty / null / not-yet-started ones).
     assert_eq!(rows[0].number, 101);
     assert_eq!(
         rows[0].build_started_at.as_deref(),
         Some("2026-06-19T11:58:00Z")
     );
-    // #102 (pos 2): the earlier of its two suite starts.
+    // #102 (pos 2): the earlier of its two check-run starts.
     assert_eq!(rows[1].number, 102);
     assert_eq!(
         rows[1].build_started_at.as_deref(),
