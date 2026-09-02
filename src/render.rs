@@ -743,10 +743,10 @@ fn legend_row(
 
 /// Paint the help legend for `view` at row `top`: the navigation keys, then only
 /// the glyphs and values that view actually uses, so a glyph the other view
-/// reuses for something else can't muddy it. The Mine view lists mergeability
-/// glyphs; the Reviews view lists review-state glyphs. Painted above
-/// the search prompt / footer, since it documents the keys they list. Returns
-/// the next free row.
+/// reuses for something else can't muddy it. The Mine view lists the approval
+/// glyphs and the conflict marker; the Reviews view lists review-state glyphs.
+/// Painted above the search prompt / footer, since it documents the keys they
+/// list. Returns the next free row.
 pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -> u16 {
     let dim = Style::new().faint();
     let mut y = paint_header(s, "Help", status::OVERLAY, None, None, ascii, top);
@@ -761,12 +761,22 @@ pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -
 
     match view {
         View::Mine => {
-            for m in status::MERGEABLE_ORDER {
-                let glyph = status::mergeable_glyph(m, ascii).to_string();
-                let color = status::fg(status::mergeable_style(m).1);
-                legend_row(s, &glyph, color, status::mergeable_meaning(m), &dim, y);
+            for a in status::APPROVAL_ORDER {
+                let glyph = status::approval_glyph(a, ascii).to_string();
+                let color = status::fg(status::approval_style(a).1);
+                legend_row(s, &glyph, color, status::approval_meaning(a), &dim, y);
                 y += 1;
             }
+            let marker = status::conflict_marker(ascii).to_string();
+            legend_row(
+                s,
+                &marker,
+                status::fg(status::RED),
+                status::CONFLICT_MEANING,
+                &dim,
+                y,
+            );
+            y += 1;
         }
         View::Reviews => {
             for r in status::REVIEW_ORDER {
@@ -784,7 +794,8 @@ pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -
 /// line + one row per entry), so callers can size a surface before painting.
 pub fn help_height(view: View) -> usize {
     2 + match view {
-        View::Mine => status::MERGEABLE_ORDER.len(),
+        // One approval glyph per state, plus the conflict marker.
+        View::Mine => status::APPROVAL_ORDER.len() + 1,
         View::Reviews => status::REVIEW_ORDER.len(),
     }
 }
@@ -948,9 +959,9 @@ mod tests {
 
     #[test]
     fn padding_uses_display_width_for_glyphs() {
-        // The check-circle glyph is one display column but several bytes; the
+        // The check glyph is one display column but several bytes; the
         // following column must still line up by display width.
-        let glyph = status::mergeable_style(status::Mergeable::Ready).0;
+        let glyph = status::approval_style(status::Approval::Approved).0;
         let table = Table {
             header: vec!["ST", "PR"],
             rows: vec![

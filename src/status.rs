@@ -1,6 +1,6 @@
 //! Shared status palette — the single source of truth for every glyph and color
-//! the dashboard draws: PR mergeability, the check-run semaphore, and review
-//! state. Catppuccin Mocha colors, Nerd Font glyphs, 24-bit truecolor.
+//! the dashboard draws: PR approval, conflicts, the check-run semaphore, and
+//! review state. Catppuccin Mocha colors, Nerd Font glyphs, 24-bit truecolor.
 
 use uncurses::color::Color;
 use uncurses::style::Style;
@@ -18,8 +18,9 @@ pub const OVERLAY: Color = Color::rgb(147, 153, 178); // #9399b2 — muted accen
 pub const SURFACE: Color = Color::rgb(69, 71, 90); // #45475a — selected-row background
 
 /// Coarse CI/merge state of an open PR. It is no longer rendered directly (the
-/// row shows a mergeability glyph plus a check-run semaphore); it exists as the
-/// bell's change key, so a finishing job doesn't ring but a red/green flip does.
+/// row shows an approval glyph, a check-run semaphore, and a marked title when
+/// it conflicts); it exists as the bell's change key, so a finishing job
+/// doesn't ring but a red/green flip does.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     Conflicts,
@@ -28,84 +29,90 @@ pub enum Status {
     Pass,
 }
 
-/// Whether a PR can be merged right now — the single leading glyph of the
-/// "My open PRs" table. Everything GitHub reports as a reason it can't merge
-/// (blocked on reviews, behind the base, red required checks, draft) collapses
-/// into `Blocked`; a merge conflict gets its own lamp because it needs a rebase.
+/// Whether a PR has an approval — the leading glyph of the "My open PRs"
+/// table. Deliberately binary: it answers only "did a human say yes?", and
+/// nothing else feeds it. Checks, unresolved threads, and conflicts each have
+/// their own place in the row.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Mergeable {
-    /// Nothing in the way: GitHub would let you merge it now.
-    Ready,
-    /// Mergeable in principle, but something is holding it: reviews, required
-    /// checks, an out-of-date base, or draft status.
-    Blocked,
-    /// Conflicts with the base branch — needs a rebase or merge.
-    Conflicts,
-    /// GitHub hasn't computed mergeability yet.
-    Unknown,
+pub enum Approval {
+    /// A reviewer approved it.
+    Approved,
+    /// Nobody has approved it yet.
+    Pending,
 }
 
-/// Mergeability states in legend order.
-pub const MERGEABLE_ORDER: [Mergeable; 4] = [
-    Mergeable::Ready,
-    Mergeable::Blocked,
-    Mergeable::Conflicts,
-    Mergeable::Unknown,
-];
+/// Approval states in legend order.
+pub const APPROVAL_ORDER: [Approval; 2] = [Approval::Approved, Approval::Pending];
 
-/// Collapse GitHub's `mergeStateStatus` (with `mergeable` as a fallback, since
-/// the two are computed by the same background job and one can land first) into
-/// the binary-ish "can I merge this?" answer the row leads with.
-pub fn mergeable_of(merge_state: Option<&str>, mergeable: Option<&str>) -> Mergeable {
-    if mergeable == Some("CONFLICTING") {
-        return Mergeable::Conflicts;
-    }
-    match merge_state {
-        Some("CLEAN" | "HAS_HOOKS") => Mergeable::Ready,
-        Some("BLOCKED" | "BEHIND" | "UNSTABLE" | "DRAFT") => Mergeable::Blocked,
-        Some("DIRTY") => Mergeable::Conflicts,
-        _ => Mergeable::Unknown,
-    }
-}
-
-/// Glyph + truecolor for a mergeability state.
-pub fn mergeable_style(m: Mergeable) -> (char, Color) {
-    match m {
-        Mergeable::Ready => ('\u{f00c}', GREEN),     // check
-        Mergeable::Blocked => ('\u{f05e}', YELLOW),  // ban
-        Mergeable::Conflicts => ('\u{f127}', RED),   // broken link
-        Mergeable::Unknown => ('\u{f128}', OVERLAY), // question mark
-    }
-}
-
-/// ASCII fallback letter for a mergeability state.
-pub fn mergeable_ascii(m: Mergeable) -> char {
-    match m {
-        Mergeable::Ready => 'y',
-        Mergeable::Blocked => 'n',
-        Mergeable::Conflicts => '!',
-        Mergeable::Unknown => '?',
-    }
-}
-
-/// The mergeability glyph to render, honoring the ASCII toggle.
-pub fn mergeable_glyph(m: Mergeable, ascii: bool) -> char {
-    if ascii {
-        mergeable_ascii(m)
+/// Whether any reviewer's latest opinionated review is an approval. A later
+/// change request does not undo it — the `THREADS` column reports what is still
+/// open, so the glyph stays on its one question. GitHub's own `reviewDecision`
+/// is deliberately not used: it is null wherever no branch rule requires a
+/// review, and it answers "may this merge?", not "did anyone approve?".
+pub fn approval_of<'a>(latest_reviews: impl IntoIterator<Item = &'a str>) -> Approval {
+    if latest_reviews.into_iter().any(|state| state == "APPROVED") {
+        Approval::Approved
     } else {
-        mergeable_style(m).0
+        Approval::Pending
     }
 }
 
-/// One-line meaning of a mergeability state (for the help legend).
-pub fn mergeable_meaning(m: Mergeable) -> &'static str {
-    match m {
-        Mergeable::Ready => "ready to merge",
-        Mergeable::Blocked => "blocked: reviews, required checks, behind, or draft",
-        Mergeable::Conflicts => "conflicts with the base branch \u{2014} needs a rebase",
-        Mergeable::Unknown => "mergeability not computed yet",
+/// Glyph + truecolor for an approval state.
+pub fn approval_style(a: Approval) -> (char, Color) {
+    match a {
+        Approval::Approved => ('\u{f00c}', GREEN), // check
+        Approval::Pending => ('\u{f05e}', YELLOW), // ban
     }
 }
+
+/// ASCII fallback letter for an approval state.
+pub fn approval_ascii(a: Approval) -> char {
+    match a {
+        Approval::Approved => 'y',
+        Approval::Pending => 'n',
+    }
+}
+
+/// The approval glyph to render, honoring the ASCII toggle.
+pub fn approval_glyph(a: Approval, ascii: bool) -> char {
+    if ascii {
+        approval_ascii(a)
+    } else {
+        approval_style(a).0
+    }
+}
+
+/// One-line meaning of an approval state (for the help legend).
+pub fn approval_meaning(a: Approval) -> &'static str {
+    match a {
+        Approval::Approved => "a reviewer approved it",
+        Approval::Pending => "nobody has approved it yet",
+    }
+}
+
+/// Whether a PR conflicts with its base branch. GitHub computes `mergeable` and
+/// `mergeStateStatus` in the same background job and one can land first, so a
+/// conflict reported by either counts. Nothing else is collapsed in here: every
+/// other reason a merge waits has its own column.
+pub fn conflicts_of(merge_state: Option<&str>, mergeable: Option<&str>) -> bool {
+    mergeable == Some("CONFLICTING") || merge_state == Some("DIRTY")
+}
+
+/// The marker that prefixes the title of a conflicting PR. It rides in the
+/// title, not in a column of its own: conflicts are rare, and a column would
+/// cost every row of every table three columns of width.
+pub fn conflict_marker(ascii: bool) -> char {
+    if ascii {
+        '!'
+    } else {
+        '\u{f127}' // broken link
+    }
+}
+
+/// One-line meaning of the conflict marker (for the help legend). It says where
+/// the marker appears, since it is the only one that is not a column of its own.
+pub const CONFLICT_MEANING: &str =
+    "before a title: conflicts with the base branch \u{2014} needs a rebase";
 
 /// A reviewer's relationship to a PR, for the Reviews view's per-row glyph.
 /// Precedence when both apply: a pending request (re-review / awaiting) beats a
@@ -252,8 +259,8 @@ pub fn status_context_lamp(state: &str) -> Option<Lamp> {
 
 /// The coarse bell key for an open PR, with the precedence
 /// `conflicts > fail > running > pass > none`.
-pub fn derive_status(m: Mergeable, c: Checks) -> Option<Status> {
-    if m == Mergeable::Conflicts {
+pub fn derive_status(conflicts: bool, c: Checks) -> Option<Status> {
+    if conflicts {
         return Some(Status::Conflicts);
     }
     if c.fail > 0 {
@@ -282,61 +289,74 @@ mod tests {
     }
 
     #[test]
-    fn mergeable_palette_glyphs_colors_and_letters() {
-        assert_eq!(mergeable_style(Mergeable::Ready), ('\u{f00c}', GREEN));
-        assert_eq!(mergeable_style(Mergeable::Blocked), ('\u{f05e}', YELLOW));
-        assert_eq!(mergeable_style(Mergeable::Conflicts), ('\u{f127}', RED));
-        assert_eq!(mergeable_style(Mergeable::Unknown), ('\u{f128}', OVERLAY));
-        assert_eq!(mergeable_ascii(Mergeable::Ready), 'y');
-        assert_eq!(mergeable_ascii(Mergeable::Blocked), 'n');
-        assert_eq!(mergeable_ascii(Mergeable::Conflicts), '!');
-        assert_eq!(mergeable_ascii(Mergeable::Unknown), '?');
-        // The ASCII toggle picks the letter; otherwise the glyph.
-        assert_eq!(mergeable_glyph(Mergeable::Ready, true), 'y');
-        assert_eq!(mergeable_glyph(Mergeable::Ready, false), '\u{f00c}');
-    }
-
-    #[test]
-    fn merge_state_collapses_to_one_answer() {
-        assert_eq!(
-            mergeable_of(Some("CLEAN"), Some("MERGEABLE")),
-            Mergeable::Ready
-        );
-        assert_eq!(
-            mergeable_of(Some("HAS_HOOKS"), Some("MERGEABLE")),
-            Mergeable::Ready
-        );
-        for blocked in ["BLOCKED", "BEHIND", "UNSTABLE", "DRAFT"] {
-            assert_eq!(
-                mergeable_of(Some(blocked), Some("MERGEABLE")),
-                Mergeable::Blocked,
-                "{blocked}"
-            );
+    fn conflicts_come_from_either_field() {
+        // Both fields agree.
+        assert!(conflicts_of(Some("DIRTY"), Some("CONFLICTING")));
+        // They are computed by the same job and one can land first, so a
+        // conflict reported by either one counts.
+        assert!(conflicts_of(Some("UNKNOWN"), Some("CONFLICTING")));
+        assert!(conflicts_of(Some("DIRTY"), None));
+        // Everything that holds a merge for another reason is not a conflict:
+        // those reasons have their own columns.
+        for state in [
+            "CLEAN",
+            "BLOCKED",
+            "BEHIND",
+            "UNSTABLE",
+            "DRAFT",
+            "HAS_HOOKS",
+        ] {
+            assert!(!conflicts_of(Some(state), Some("MERGEABLE")), "{state}");
         }
-        assert_eq!(
-            mergeable_of(Some("DIRTY"), Some("CONFLICTING")),
-            Mergeable::Conflicts
-        );
-        // `mergeable` can land before `mergeStateStatus` does: a known conflict
-        // wins over an as-yet-uncomputed merge state.
-        assert_eq!(
-            mergeable_of(Some("UNKNOWN"), Some("CONFLICTING")),
-            Mergeable::Conflicts
-        );
-        assert_eq!(mergeable_of(Some("UNKNOWN"), None), Mergeable::Unknown);
-        assert_eq!(mergeable_of(None, None), Mergeable::Unknown);
+        assert!(!conflicts_of(Some("UNKNOWN"), None));
+        assert!(!conflicts_of(None, None));
     }
 
     #[test]
-    fn review_letters_are_distinct_from_mergeable_letters() {
-        let letters: Vec<char> = MERGEABLE_ORDER
+    fn the_conflict_marker_honors_the_ascii_toggle() {
+        assert_eq!(conflict_marker(true), '!');
+        assert_eq!(conflict_marker(false), '\u{f127}');
+    }
+
+    #[test]
+    fn approval_palette_glyphs_colors_and_letters() {
+        assert_eq!(approval_style(Approval::Approved), ('\u{f00c}', GREEN));
+        assert_eq!(approval_style(Approval::Pending), ('\u{f05e}', YELLOW));
+        assert_eq!(approval_ascii(Approval::Approved), 'y');
+        assert_eq!(approval_ascii(Approval::Pending), 'n');
+        // The ASCII toggle picks the letter; otherwise the glyph.
+        assert_eq!(approval_glyph(Approval::Approved, true), 'y');
+        assert_eq!(approval_glyph(Approval::Approved, false), '\u{f00c}');
+    }
+
+    #[test]
+    fn one_approval_is_enough_and_a_change_request_does_not_undo_it() {
+        assert_eq!(approval_of([]), Approval::Pending);
+        assert_eq!(approval_of(["APPROVED"]), Approval::Approved);
+        assert_eq!(approval_of(["CHANGES_REQUESTED"]), Approval::Pending);
+        // A change request leaves the approval standing: the THREADS column
+        // reports what is still open, so the glyph keeps its one meaning.
+        assert_eq!(
+            approval_of(["APPROVED", "CHANGES_REQUESTED"]),
+            Approval::Approved
+        );
+        assert_eq!(
+            approval_of(["CHANGES_REQUESTED", "APPROVED"]),
+            Approval::Approved
+        );
+    }
+
+    #[test]
+    fn review_letters_are_distinct_from_the_open_pr_letters() {
+        let letters: Vec<char> = APPROVAL_ORDER
             .iter()
-            .map(|m| mergeable_ascii(*m))
+            .map(|a| approval_ascii(*a))
+            .chain([conflict_marker(true)])
             .collect();
         for r in REVIEW_ORDER {
             assert!(
                 !letters.contains(&review_ascii(r)),
-                "review letter for {r:?} collides with a mergeability letter"
+                "review letter for {r:?} collides with an open-PR letter"
             );
         }
     }
@@ -399,26 +419,17 @@ mod tests {
     fn precedence_is_respected() {
         // Conflicts beat failing checks.
         assert_eq!(
-            derive_status(Mergeable::Conflicts, checks(2, 1, 5)),
+            derive_status(true, checks(2, 1, 5)),
             Some(Status::Conflicts)
         );
         // Fail beats running.
-        assert_eq!(
-            derive_status(Mergeable::Blocked, checks(1, 3, 5)),
-            Some(Status::Fail)
-        );
+        assert_eq!(derive_status(false, checks(1, 3, 5)), Some(Status::Fail));
         // Running beats pass.
-        assert_eq!(
-            derive_status(Mergeable::Ready, checks(0, 3, 5)),
-            Some(Status::Pending)
-        );
+        assert_eq!(derive_status(false, checks(0, 3, 5)), Some(Status::Pending));
         // All green.
-        assert_eq!(
-            derive_status(Mergeable::Ready, checks(0, 0, 5)),
-            Some(Status::Pass)
-        );
+        assert_eq!(derive_status(false, checks(0, 0, 5)), Some(Status::Pass));
         // No checks at all -> nothing to report.
-        assert_eq!(derive_status(Mergeable::Ready, Checks::default()), None);
+        assert_eq!(derive_status(false, Checks::default()), None);
     }
 
     #[test]

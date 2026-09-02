@@ -21,10 +21,12 @@ list includes only PRs that request you directly or also your teams'.
 It talks to the GitHub API directly. On first run it walks you through a
 one-time browser **device login** (or set `GITHUB_TOKEN`).
 
-Each open PR leads with **one** Catppuccin-colored glyph answering "can I merge
-this?" — ready, blocked (reviews, required checks, behind the base, draft), or
-conflicting. Everything that could be blocking it is then broken out to the
-right: a red/yellow/green **check semaphore** (`FAIL` / `RUN` / `PASS` check-run
+Each open PR leads with **one** Catppuccin-colored glyph answering one question:
+did a reviewer **approve** it? Nothing else feeds that glyph — a later change
+request does not undo the approval, since the thread count is right there. A PR
+that **conflicts** with its base branch marks its own title in red, so it costs
+no column. Everything else that could hold a PR back is broken out to the right:
+a red/yellow/green **check semaphore** (`FAIL` / `RUN` / `PASS` check-run
 counts) and the number of unresolved review **threads**. Nothing is reported
 twice.
 
@@ -33,9 +35,9 @@ next to how long they've been queued and how long that build has been running.
 Use `--required` to count only checks required to merge each pull request; in
 the merge queue, `BUILD` then starts at the first required job.
 
-On a TTY prowl uses Nerd Font icons; with `--ascii` (or when piped) the
-mergeability glyph falls back to `y` ready, `n` blocked, `!` conflicts, `?`
-unknown. `--branch` adds the head branch to every PR table, and `--no-draft`
+On a TTY prowl uses Nerd Font icons; with `--ascii` (or when piped) approval
+falls back to `y` approved and `n` not approved, and the conflict marker to `!`.
+`--branch` adds the head branch to every PR table, and `--no-draft`
 hides drafts. Each PR number is a clickable link to the PR. Tables use the full
 terminal width, giving most space to the title and then the optional branch. As
 the terminal gets narrower, detail columns disappear from the right; the
@@ -87,7 +89,8 @@ each with a hidden count, before disappearing. In the reviews view it hides
 reviewed-and-merged PRs. The open PR section is always kept whole. If that
 section or the minimum useful columns do not fit, prowl shows
 `Terminal too small` with the minimum required dimensions. The legend is contextual to the active view:
-mergeability glyphs for your PRs, review glyphs for your reviews.
+approval glyphs and the conflict marker for your PRs, review glyphs for your
+reviews.
 
 Move the selection cursor through the listed PRs and releases with `j`/`k` (or
 `↓`/`↑`), `g`/`G` for the first/last row, and `Ctrl-D`/`Ctrl-U` to jump half a

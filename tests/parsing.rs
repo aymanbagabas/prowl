@@ -3,7 +3,7 @@
 //! rows and rendered. No network access.
 
 use prowl::model::{MergedData, MineData, QueueData, ReviewsData, queue_nodes};
-use prowl::status::{Checks, Mergeable, ReviewState, Status};
+use prowl::status::{Checks, ReviewState, Status};
 use prowl::{github, merged, prs, queue, render, reviews};
 use std::collections::HashSet;
 
@@ -157,7 +157,7 @@ fn mine_parses_sorts_and_derives_mergeability_and_checks() {
 
     // #6475 conflicts (DIRTY), and its rollup has 4 failing runs; NEUTRAL and
     // SUCCESS both count as passed.
-    assert_eq!(rows[0].mergeable, Mergeable::Conflicts);
+    assert!(rows[0].conflicts);
     assert_eq!(
         rows[0].checks,
         Checks {
@@ -170,11 +170,11 @@ fn mine_parses_sorts_and_derives_mergeability_and_checks() {
     assert_eq!(rows[0].branch, "goreleaser-install-script");
 
     // #5323 conflicts and has no checks at all.
-    assert_eq!(rows[1].mergeable, Mergeable::Conflicts);
+    assert!(rows[1].conflicts);
     assert!(rows[1].checks.is_empty());
 
-    // #6656 is BLOCKED (waiting on a review), all checks green.
-    assert_eq!(rows[2].mergeable, Mergeable::Blocked);
+    // #6656 has no conflicts (BLOCKED on a review), all checks green.
+    assert!(!rows[2].conflicts);
     assert_eq!(
         rows[2].checks,
         Checks {
@@ -187,13 +187,21 @@ fn mine_parses_sorts_and_derives_mergeability_and_checks() {
 }
 
 #[test]
-fn mine_ascii_mergeable_letters() {
+fn mine_ascii_approval_letters_and_conflict_titles() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
     let rows = prs::build_rows(data.search.nodes);
     let table = prs::to_table(&rows, true, &HashSet::new(), false); // ascii, no highlights
-    // Column 0 is the change marker; column 1 is the mergeability glyph.
-    let st: Vec<&str> = table.rows.iter().map(|r| r[1].text.as_str()).collect();
-    assert_eq!(st, vec!["!", "!", "n"]); // conflicts, conflicts, blocked
+    // Column 0 is the change marker, column 1 the approval glyph. Nobody
+    // approved any of these three.
+    let approval: Vec<&str> = table.rows.iter().map(|r| r[1].text.as_str()).collect();
+    assert_eq!(approval, vec!["n", "n", "n"]);
+    // #6475 and #5323 conflict, so their titles carry the marker; #6656 does not.
+    let marked: Vec<bool> = table
+        .rows
+        .iter()
+        .map(|r| r[3].text.starts_with("! "))
+        .collect();
+    assert_eq!(marked, vec![true, true, false]);
 }
 
 #[test]

@@ -80,10 +80,12 @@ watch event loop); everything else is testable modules:
   the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
   two aliased searches, `requested:` + `reviewed:`) and `fetch_reviewed_merged`
   (reuses `merged_query`, now carrying `author`).
-- `status.rs` — **the** palette: `Mergeable` (Ready/Blocked/Conflicts/Unknown)
-  with `mergeable_of` (collapses `mergeStateStatus` + `mergeable`),
-  `mergeable_style`/`mergeable_glyph`/`mergeable_ascii`/`mergeable_meaning` and
-  `MERGEABLE_ORDER`; the check semaphore — `Lamp` (Fail/Running/Pass),
+- `status.rs` — **the** palette: `Approval` (Approved/Pending) with
+  `approval_of` (any `latestOpinionatedReviews` state is `APPROVED`),
+  `approval_style`/`approval_glyph`/`approval_ascii`/`approval_meaning` and
+  `APPROVAL_ORDER`; the conflict marker — `conflicts_of` (true when `mergeable`
+  or `mergeStateStatus` reports a conflict; every other reason a merge waits has
+  its own column), `conflict_marker` and `CONFLICT_MEANING`; the check semaphore — `Lamp` (Fail/Running/Pass),
   `lamp_color`, `Checks` (fail/running/pass counts) and the state→lamp maps
   `check_run_lamp` / `status_context_lamp`; `Status` + `derive_status`, which is
   now only the bell's coarse change key (nothing renders it); and the
@@ -101,7 +103,8 @@ watch event loop); everything else is testable modules:
   largest flexible column and optional `BRANCH` is second. As width falls,
   columns right of `TITLE` disappear from right to left, with `BRANCH` removed
   last; `FAIL`/`RUN`/`PASS` hide as one semantic group, never as partial lamps.
-  `TableAlignment` shares the two-column gutter and PR widths across all
+  `TableAlignment` shares the two-column gutter (marker, glyph) and PR widths
+  across all
   tables in a view; when branches are shown it also shares TITLE width, so PR,
   TITLE, and BRANCH all start on the same columns. Below 24 columns the
   dashboard reports `Terminal too small — need W×H.` Piped output and screenshots use
@@ -118,7 +121,7 @@ watch event loop); everything else is testable modules:
   the caret cell, so the watch can park the terminal's real one there), and the
   help legend
   (`paint_help(view, …)` — a movement-keys line then, contextual: the
-  mergeability glyphs for Mine, review glyphs for Reviews; the column headers
+  approval glyphs and the conflict marker for Mine, review glyphs for Reviews; the column headers
   speak for themselves and are not repeated; first in the bottom block, above the
   search prompt and footer) live here too, plus `render_table`
   (paint one table to a string, for tests) and `paint_dim`/`paint_dim_at`, the
@@ -141,13 +144,15 @@ watch event loop); everything else is testable modules:
   the first visible body row onto the top of the screen.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
   Each row's PR number is the OSC-8 link (no separate URL column). The open-PRs
-  columns are `[mark] [M] PR TITLE [BRANCH] THREADS FAIL RUN PASS`: `M` is the
-  single mergeability glyph, `FAIL`/`RUN`/`PASS` are the check-run semaphore
+  columns are `[mark] [A] PR TITLE [BRANCH] THREADS FAIL RUN PASS`: `A` is the
+  approval glyph, a conflicting PR prefixes its own `TITLE` with the red conflict
+  marker (`status::conflict_marker`) instead of spending a column every other row
+  would leave blank, `FAIL`/`RUN`/`PASS` are the check-run semaphore
   (always all three, dim when zero, colored when not) and `THREADS` the
   unresolved review threads (`100+` when the page was capped).
   `--branch` adds `BRANCH` to every PR table; `prs::without_drafts` backs
   `--no-draft`. The queue
-  columns are `# PR TITLE [BRANCH] AUTHOR WAIT BUILD FAIL RUN PASS` (author truncated to
+  columns are `# [blank] PR TITLE [BRANCH] AUTHOR WAIT BUILD FAIL RUN PASS` (author truncated to
   `AUTHOR_WIDTH`), where `WAIT` is how long the entry has been queued (now −
   `enqueuedAt`) and `BUILD` is how long its speculative merge commit has been
   building — now − the earliest check-run `startedAt` in the commit's
@@ -278,10 +283,19 @@ still performs all teardown through `finish`.
 
 ## Key behaviors
 
-- **Mergeability glyph:** `mergeStateStatus` collapses to one answer — `CLEAN`/
-  `HAS_HOOKS` → Ready, `BLOCKED`/`BEHIND`/`UNSTABLE`/`DRAFT` → Blocked, `DIRTY`
-  → Conflicts, anything else → Unknown; a `mergeable: CONFLICTING` wins outright
-  (the two fields are computed by the same job and one can land first).
+- **Approval glyph:** approved when any reviewer's latest opinionated review is
+  `APPROVED`, and nothing else feeds it — a later change request does not undo
+  it, because `THREADS` already reports what is still open. GitHub's own
+  `reviewDecision` is deliberately unused: it is null wherever no branch rule
+  requires a review, and it answers "may this merge?", not "did anyone
+  approve?". Across 189 real PRs it never reported `APPROVED` without an
+  approving review, so it adds nothing here.
+- **Conflict marker:** a conflicting PR (`mergeable: CONFLICTING` or
+  `mergeStateStatus: DIRTY` — the two are computed by the same job and one can
+  land first) prefixes its title with a red marker; nothing else marks the
+  title. Being blocked on reviews, required checks, a stale base, or draft
+  status is the approval glyph's, the semaphore's, or the dimmed PR number's
+  job.
 - **Check counts** come from the rollup's `checkRunCountsByState` /
   `statusContextCountsByState` aggregates, so they're exact and unpaginated —
   no phantom zero-run check suites and no truncated page to compensate for.
@@ -365,7 +379,7 @@ still performs all teardown through `finish`.
   with the cursor hidden (it reappears only in the search prompt); raw mode means stray keystrokes never garble the
   dashboard or spill into the shell. `r`/`R` forces a refresh now; `Tab` switches
   view; `?` toggles the help legend (contextual to the active view —
-  mergeability glyphs for Mine, review glyphs for Reviews — hidden by
+  approval glyphs and the conflict marker for Mine, review glyphs for Reviews — hidden by
   default, rendered at the top of the bottom block, above the search prompt and
   footer whose keys it documents; `--no-help` only affects
   one-shot/piped output). The movement keys (`j`/`k`, arrows, `g`/`G`,
@@ -410,7 +424,8 @@ still performs all teardown through `finish`.
   (the FAIL/RUN/PASS semaphore), plus the queue-level
   `nextEntryEstimatedTimeToMerge` (the header ETA).
 - Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
-  `mergeStateStatus`, `mergeQueueEntry`, `headRefName`, `updatedAt`,
+  `mergeStateStatus`, `latestOpinionatedReviews(first: 100) { nodes { state } }`,
+  `mergeQueueEntry`, `headRefName`, `updatedAt`,
   `reviewThreads(first: 100) { totalCount nodes { isResolved } }` (no unresolved
   aggregate exists, hence the page + a `+` when capped), and the last commit's
   `statusCheckRollup { contexts(first: 1) { checkRunCountsByState

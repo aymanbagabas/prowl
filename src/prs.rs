@@ -1,14 +1,14 @@
 //! My-open-PRs view: rows, sorting, styling, and table building.
 //!
-//! One row is: a change marker, a single mergeability glyph (the whole "can I
-//! merge this?" answer), the PR number + title + branch, and then the
-//! detail group that explains a blocked PR — a failing/running/passing check
-//! semaphore and the unresolved-review-thread count. Conflicts are *only* the
-//! glyph's job, so nothing is reported twice.
+//! One row is: a change marker, an approval glyph, the PR number + title +
+//! branch, and then the detail group that explains a PR that cannot merge yet —
+//! a failing/running/passing check semaphore and the unresolved-review-thread
+//! count. A conflicting PR marks its own title, so conflicts cost no column.
+//! Each column answers exactly one question, so nothing is reported twice.
 
 use crate::model::PrNode;
 use crate::render::{self, Cell, Table};
-use crate::status::{self, BLUE, Checks, Lamp, Mergeable, PEACH, Status};
+use crate::status::{self, Approval, BLUE, Checks, Lamp, PEACH, RED, Status};
 use std::collections::HashSet;
 use uncurses::style::Style;
 
@@ -20,8 +20,10 @@ pub struct PrRow {
     /// Head branch.
     #[serde(default)]
     pub branch: String,
-    /// The leading glyph: whether GitHub would let this merge right now.
-    pub mergeable: Mergeable,
+    /// The leading glyph: whether a human approved it.
+    pub approval: Approval,
+    /// Whether it conflicts with its base branch — marks the title.
+    pub conflicts: bool,
     /// Coarse CI/merge state; not rendered, it is the bell's change key.
     pub status: Option<Status>,
     /// Failing / running / passing check runs on the last commit.
@@ -41,14 +43,15 @@ pub fn build_rows(nodes: Vec<PrNode>) -> Vec<PrRow> {
         .into_iter()
         .map(|pr| {
             let checks = pr.checks();
-            let mergeable =
-                status::mergeable_of(pr.merge_state_status.as_deref(), pr.mergeable.as_deref());
+            let conflicts =
+                status::conflicts_of(pr.merge_state_status.as_deref(), pr.mergeable.as_deref());
             let (unresolved, unresolved_capped) = pr.review_threads.unresolved();
             PrRow {
                 number: pr.number,
                 is_draft: pr.is_draft,
-                mergeable,
-                status: status::derive_status(mergeable, checks),
+                approval: pr.approval(),
+                conflicts,
+                status: status::derive_status(conflicts, checks),
                 checks,
                 unresolved,
                 unresolved_capped,
@@ -88,12 +91,21 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>, show_bran
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let mark = render::change_marker(highlight.contains(&r.number), ascii);
-        let (glyph, color) = (
-            status::mergeable_glyph(r.mergeable, ascii),
-            status::mergeable_style(r.mergeable).1,
+        let approval = Cell::styled(
+            status::approval_glyph(r.approval, ascii).to_string(),
+            status::fg(status::approval_style(r.approval).1),
         );
-        let merge = Cell::styled(glyph.to_string(), status::fg(color));
-        // A draft's number is dimmed; the glyph already reports it as blocked.
+        // A conflicting PR marks its own title, in red, instead of spending a
+        // column that every other row would leave blank.
+        let title = if r.conflicts {
+            Cell::styled(
+                format!("{} {}", status::conflict_marker(ascii), r.title),
+                status::fg(RED),
+            )
+        } else {
+            Cell::plain(r.title.clone())
+        };
+        // A draft's number is dimmed: it can't merge whatever the glyph says.
         let pr_style = if r.is_draft {
             dim.clone()
         } else {
@@ -110,7 +122,7 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>, show_bran
             )
         };
 
-        let mut row = vec![mark, merge, pr, Cell::plain(r.title.clone())];
+        let mut row = vec![mark, approval, pr, title];
         if show_branch {
             row.push(Cell::styled(r.branch.clone(), &dim));
         }
@@ -134,8 +146,8 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>, show_bran
 mod tests {
     use super::*;
     use crate::model::{
-        Commit, CommitNode, Commits, QueueEntry, ReviewThread, ReviewThreads, Rollup, RollupCounts,
-        StateCount,
+        Commit, CommitNode, Commits, OpinionatedReview, OpinionatedReviews, QueueEntry,
+        ReviewThread, ReviewThreads, Rollup, RollupCounts, StateCount,
     };
 
     /// A PR node with the given merge state and per-state check-run counts.
@@ -149,6 +161,7 @@ mod tests {
             is_draft: false,
             updated_at: None,
             head_ref_name: Some(format!("branch-{number}")),
+            latest_opinionated_reviews: OpinionatedReviews::default(),
             merge_queue_entry: None,
             review_threads: ReviewThreads {
                 total_count: 0,
@@ -178,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn sorts_by_updated_at_then_derives_checks_and_mergeability() {
+    fn sorts_by_updated_at_then_derives_checks_and_conflicts() {
         let mut a = pr(10, "MERGEABLE", "BLOCKED", &[("SUCCESS", 8)]);
         a.updated_at = Some("2026-06-19T10:00:00Z".to_string());
         let mut b = pr(
@@ -192,7 +205,7 @@ mod tests {
         // lower number.
         let rows = build_rows(vec![a, b]);
         assert_eq!(rows[0].number, 10);
-        assert_eq!(rows[0].mergeable, Mergeable::Blocked);
+        assert!(!rows[0].conflicts);
         assert_eq!(
             rows[0].checks,
             Checks {
@@ -203,7 +216,7 @@ mod tests {
         );
         assert_eq!(rows[0].status, Some(Status::Pass));
         assert_eq!(rows[1].number, 42);
-        assert_eq!(rows[1].mergeable, Mergeable::Conflicts);
+        assert!(rows[1].conflicts);
         assert_eq!(
             rows[1].checks,
             Checks {
@@ -234,6 +247,61 @@ mod tests {
             }
         );
         assert_eq!(rows[0].status, Some(Status::Pending));
+    }
+
+    /// A PR whose reviewers left these latest opinionated review states.
+    fn reviewed(number: i64, states: &[&str]) -> PrNode {
+        let mut p = pr(number, "MERGEABLE", "CLEAN", &[]);
+        p.latest_opinionated_reviews = OpinionatedReviews {
+            nodes: states
+                .iter()
+                .map(|state| OpinionatedReview {
+                    state: (*state).to_string(),
+                })
+                .collect(),
+        };
+        p
+    }
+
+    #[test]
+    fn approval_comes_from_the_latest_reviews() {
+        let rows = build_rows(vec![
+            reviewed(1, &["APPROVED"]),
+            // A change request does not undo an approval: THREADS reports what
+            // is still open.
+            reviewed(2, &["APPROVED", "CHANGES_REQUESTED"]),
+            reviewed(3, &["CHANGES_REQUESTED"]),
+            reviewed(4, &[]),
+        ]);
+        let approval = |number: i64| {
+            rows.iter()
+                .find(|r| r.number == number)
+                .expect("row")
+                .approval
+        };
+        assert_eq!(approval(1), Approval::Approved);
+        assert_eq!(approval(2), Approval::Approved);
+        assert_eq!(approval(3), Approval::Pending);
+        assert_eq!(approval(4), Approval::Pending);
+    }
+
+    #[test]
+    fn approval_leads_the_row_and_a_conflict_marks_the_title() {
+        let mut conflicted = reviewed(1, &["APPROVED"]);
+        conflicted.mergeable = Some("CONFLICTING".to_string());
+        conflicted.merge_state_status = Some("DIRTY".to_string());
+        let rows = build_rows(vec![conflicted]);
+        let table = to_table(&rows, true, &HashSet::new(), false);
+        // [mark] [approval] PR TITLE ...
+        assert_eq!(table.rows[0][1].text, "y");
+        assert_eq!(table.rows[0][3].text, "! PR 1");
+    }
+
+    #[test]
+    fn a_clean_title_carries_no_marker() {
+        let rows = build_rows(vec![pr(1, "MERGEABLE", "CLEAN", &[])]);
+        let table = to_table(&rows, true, &HashSet::new(), false);
+        assert_eq!(table.rows[0][3].text, "PR 1");
     }
 
     #[test]
