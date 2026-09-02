@@ -45,12 +45,14 @@ pub fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-/// Compact relative age of `then` as seen from `now`: `just now`, `5m`, `2h`,
-/// `3d`, `1w`. Kept pure (both instants passed in) so it is trivially testable.
+/// Compact relative age of `then` as seen from `now`: `now`, `5m`, `2h`,
+/// `3d`, `1w`. Every value is short, so a row aging out of one bucket never
+/// changes the column width (and never shifts the whole table). Kept pure
+/// (both instants passed in) so it is trivially testable.
 pub fn relative_age(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
     let secs = (now - then).num_seconds().max(0);
     if secs < 60 {
-        "just now".to_string()
+        "now".to_string()
     } else if secs < 3_600 {
         format!("{}m", secs / 60)
     } else if secs < 86_400 {
@@ -94,12 +96,12 @@ mod tests {
     #[test]
     fn relative_age_buckets() {
         let now = at("2026-06-19T12:00:00Z");
-        assert_eq!(relative_age(now, at("2026-06-19T11:59:30Z")), "just now");
+        assert_eq!(relative_age(now, at("2026-06-19T11:59:30Z")), "now");
         assert_eq!(relative_age(now, at("2026-06-19T11:55:00Z")), "5m");
         assert_eq!(relative_age(now, at("2026-06-19T10:00:00Z")), "2h");
         assert_eq!(relative_age(now, at("2026-06-16T12:00:00Z")), "3d");
         assert_eq!(relative_age(now, at("2026-06-12T12:00:00Z")), "1w");
-        // Future timestamps clamp to "just now" rather than going negative.
-        assert_eq!(relative_age(now, at("2026-06-19T12:05:00Z")), "just now");
+        // Future timestamps clamp to "now" rather than going negative.
+        assert_eq!(relative_age(now, at("2026-06-19T12:05:00Z")), "now");
     }
 }
