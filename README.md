@@ -2,7 +2,7 @@
 
 > A tiny terminal radar for your GitHub pull requests.
 
-<img alt="prowl" width="1300" src="https://github.com/user-attachments/assets/b9045507-9b5d-4216-9192-2ce2a280e69f" />
+<img alt="prowl" width="1300" src="https://github.com/user-attachments/assets/d9dff616-2631-4115-9344-d0c5f42c83ef" />
 
 A tiny terminal dashboard that watches a GitHub repo's **open PRs**, its
 **merge queue**, your **recently merged PRs**, and the **commits you've
