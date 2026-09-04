@@ -996,9 +996,9 @@ dependencies = [
 
 [[package]]
 name = "uncurses"
-version = "0.0.4"
+version = "0.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0af3c5a33f1a1340c4610106823c31c70cbc27807dd1f3027471fb2232b89cc"
+checksum = "4ae7ba723f6393e94fe4d6a7687d12acf3107e2ed6ca918fa86dc7bed21e9e8a"
 dependencies = [
  "bitflags",
  "compact_str",
