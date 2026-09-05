@@ -28,6 +28,31 @@ pub struct QueueRow {
     pub checks: Checks,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum VisibleRows {
+    All,
+    BuildingAndMine,
+    Building,
+}
+
+impl VisibleRows {
+    pub(crate) fn includes(self, row: &QueueRow) -> bool {
+        match self {
+            Self::All => true,
+            Self::BuildingAndMine => row.checks.running > 0 || row.mine,
+            Self::Building => row.checks.running > 0,
+        }
+    }
+
+    pub(crate) fn count(self, rows: &[QueueRow]) -> usize {
+        self.iter(rows).count()
+    }
+
+    pub(crate) fn iter(self, rows: &[QueueRow]) -> impl Iterator<Item = &QueueRow> {
+        rows.iter().filter(move |row| self.includes(row))
+    }
+}
+
 /// Build rows ordered by queue position ascending; `mine` flags own PRs.
 pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
     let mut rows: Vec<QueueRow> = nodes

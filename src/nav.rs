@@ -125,10 +125,24 @@ fn groups<'a>(view: View, s: &'a Sections, query: &str, visible: Visibility) -> 
             prs_group(
                 when_visible(s.prs.as_deref(), visible.prs),
                 &q,
-                visible.queue,
+                visible.queue.is_some(),
             ),
-            group(when_visible(s.queue.as_deref(), visible.queue), &q),
-            group(when_visible(s.merged.as_deref(), visible.merged), &q),
+            visible.queue.map_or_else(Vec::new, |mode| {
+                s.queue.as_deref().map_or_else(Vec::new, |rows| {
+                    mode.iter(rows)
+                        .filter(|row| hit(&row.haystack(), &q))
+                        .map(Searchable::url)
+                        .collect()
+                })
+            }),
+            visible.merged.map_or_else(Vec::new, |shown| {
+                group(
+                    s.merged
+                        .as_deref()
+                        .map(|rows| &rows[..shown.min(rows.len())]),
+                    &q,
+                )
+            }),
             if visible.shipments {
                 shipments(s, &q)
             } else {
@@ -274,15 +288,6 @@ pub(crate) fn moved(action: Move, sel: Option<usize>, len: usize, half: usize) -
     })
 }
 
-/// Clamp a selection to a (possibly shrunk) list after a refresh: drop it when
-/// the list is empty, else pin it to the last row if it fell off the end.
-pub(crate) fn clamp(sel: Option<usize>, len: usize) -> Option<usize> {
-    match sel {
-        Some(i) if len > 0 => Some(i.min(len - 1)),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,7 +304,8 @@ mod tests {
             is_draft: false,
             title: format!("pr {n}"),
             branch: format!("b/{n}"),
-            mergeable: crate::status::Mergeable::Ready,
+            approval: crate::status::Approval::Approved,
+            conflicts: false,
             status: None,
             checks: crate::status::Checks::default(),
             unresolved: 0,
@@ -434,8 +440,8 @@ mod tests {
         s.merged = Some(vec![merged(3)]);
         let visible = Visibility {
             prs: true,
-            queue: false,
-            merged: false,
+            queue: None,
+            merged: None,
             shipments: false,
             reviews: false,
             reviewed_merged: false,
@@ -459,6 +465,64 @@ mod tests {
     }
 
     #[test]
+    fn partial_sections_expose_only_rendered_targets() {
+        let mut building = queued(1);
+        building.mine = false;
+        building.checks.running = 1;
+        let mine = queued(2);
+        let mut other = queued(3);
+        other.mine = false;
+
+        let mut s = empty();
+        s.queue = Some(vec![building, mine, other]);
+        s.merged = Some(vec![merged(4), merged(5)]);
+        let mut visible = Visibility::all(&s);
+        visible.queue = Some(crate::queue::VisibleRows::BuildingAndMine);
+        visible.merged = Some(1);
+
+        assert_eq!(
+            targets_visible(View::Mine, &s, "", visible),
+            vec!["https://q/1", "https://q/2", "https://m/4"]
+        );
+        assert_eq!(
+            section_at_visible(View::Mine, &s, "", 0, visible),
+            vec!["https://q/1", "https://q/2"]
+        );
+        assert_eq!(
+            section_at_visible(View::Mine, &s, "", 2, visible),
+            vec!["https://m/4"]
+        );
+
+        visible.queue = Some(crate::queue::VisibleRows::Building);
+        assert_eq!(
+            targets_visible(View::Mine, &s, "", visible),
+            vec!["https://q/1", "https://m/4"]
+        );
+    }
+
+    #[test]
+    fn queue_membership_changes_can_restore_selection_by_url() {
+        let mut building = queued(1);
+        building.mine = false;
+        building.checks.running = 1;
+        let mine_b = queued(2);
+        let mine_c = queued(3);
+        let mut s = empty();
+        s.queue = Some(vec![building, mine_b, mine_c]);
+        let mut visible = Visibility::all(&s);
+        visible.queue = Some(crate::queue::VisibleRows::BuildingAndMine);
+
+        let selected = targets_visible(View::Mine, &s, "", visible)[1].to_string();
+        s.queue.as_mut().unwrap()[0].checks.running = 0;
+
+        assert_eq!(
+            target_index(View::Mine, &s, "", visible, &selected),
+            Some(0),
+            "the same PR should move with its URL, not retain its old index"
+        );
+    }
+
+    #[test]
     fn queued_pr_returns_to_open_targets_when_queue_is_hidden() {
         let mut queued_pr = pr(1);
         queued_pr.queue = Some((1, "QUEUED".into()));
@@ -471,7 +535,7 @@ mod tests {
             targets_visible(View::Mine, &s, "", visible),
             vec!["https://q/1"]
         );
-        visible.queue = false;
+        visible.queue = None;
         assert_eq!(
             targets_visible(View::Mine, &s, "", visible),
             vec!["https://pr/1"]
@@ -599,13 +663,5 @@ mod tests {
         assert_eq!(moved(Move::Top, Some(3), 5, 2), Some(0));
         // An empty list has nothing to select.
         assert_eq!(moved(Move::Down, Some(0), 0, 2), None);
-    }
-
-    #[test]
-    fn clamp_pins_or_drops() {
-        assert_eq!(clamp(Some(9), 5), Some(4));
-        assert_eq!(clamp(Some(2), 5), Some(2));
-        assert_eq!(clamp(Some(0), 0), None);
-        assert_eq!(clamp(None, 5), None);
     }
 }

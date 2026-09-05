@@ -157,7 +157,7 @@ fn pr_number(subject: &str) -> Option<u32> {
 
 /// First-line PR number of a commit, if any.
 fn commit_pr(node: &CommitNode) -> Option<u32> {
-    pr_number(node.commit.message.lines().next().unwrap_or_default())
+    node.commit.message.lines().next().and_then(pr_number)
 }
 
 /// My commit count and the PR numbers I authored among `commits` (`total` is

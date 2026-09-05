@@ -97,17 +97,17 @@ struct GqlError {
 pub fn parse_graphql<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     let env: Envelope<serde_json::Value> =
         serde_json::from_slice(bytes).context("failed to parse GraphQL JSON")?;
-    let first_error = || env.errors.as_ref().and_then(|e| e.first());
+    let first_error = env.errors.as_ref().and_then(|e| e.first());
     if let Some(data) = env.data {
         return match serde_json::from_value(data) {
             Ok(typed) => Ok(typed),
-            Err(err) => match first_error() {
+            Err(err) => match first_error {
                 Some(gql) => bail!("GraphQL error: {}", gql.message),
                 None => Err(err).context("failed to parse GraphQL data"),
             },
         };
     }
-    if let Some(gql) = first_error() {
+    if let Some(gql) = first_error {
         bail!("GraphQL error: {}", gql.message);
     }
     bail!("GraphQL response had no data")

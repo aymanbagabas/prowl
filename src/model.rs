@@ -4,7 +4,7 @@
 //! commit lookup per pull request.
 
 use crate::github::{Client, Repo};
-use crate::status::{self, Checks};
+use crate::status::{self, Approval, Checks};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -236,6 +236,7 @@ pub const MINE_QUERY: &str = r#"query($q: String!) {
     nodes {
       ... on PullRequest {
         number title url mergeable mergeStateStatus isDraft updatedAt headRefName
+        latestOpinionatedReviews(first: 100) { nodes { state } }
         mergeQueueEntry { position state }
         reviewThreads(first: 100) { totalCount nodes { isResolved } }
         commits(last: 1) { nodes { commit { id statusCheckRollup { contexts(first: 1) {
@@ -272,6 +273,9 @@ pub struct PrNode {
     /// The PR's head branch.
     #[serde(rename = "headRefName")]
     pub head_ref_name: Option<String>,
+    /// The latest `APPROVED` / `CHANGES_REQUESTED` review of each reviewer.
+    #[serde(rename = "latestOpinionatedReviews", default)]
+    pub latest_opinionated_reviews: OpinionatedReviews,
     #[serde(rename = "mergeQueueEntry")]
     pub merge_queue_entry: Option<QueueEntry>,
     #[serde(rename = "reviewThreads")]
@@ -284,6 +288,18 @@ pub struct PrNode {
 #[derive(Debug, Deserialize)]
 pub struct QueueEntry {
     pub position: i64,
+    pub state: String,
+}
+
+/// The latest opinionated (approving or change-requesting) review of every
+/// reviewer of a PR.
+#[derive(Debug, Default, Deserialize)]
+pub struct OpinionatedReviews {
+    pub nodes: Vec<OpinionatedReview>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpinionatedReview {
     pub state: String,
 }
 
@@ -380,6 +396,16 @@ impl PrNode {
         checks_from_counts(
             &rollup.contexts.check_runs,
             &rollup.contexts.status_contexts,
+        )
+    }
+
+    /// Whether a reviewer approved the PR.
+    pub fn approval(&self) -> Approval {
+        status::approval_of(
+            self.latest_opinionated_reviews
+                .nodes
+                .iter()
+                .map(|r| r.state.as_str()),
         )
     }
 }

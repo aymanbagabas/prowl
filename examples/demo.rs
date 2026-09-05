@@ -21,7 +21,7 @@ use prowl::merged::MergedRow;
 use prowl::prs::PrRow;
 use prowl::queue::QueueRow;
 use prowl::reviews::{ReviewRow, ReviewedMergedRow};
-use prowl::status::{Checks, Mergeable, ReviewState, Status};
+use prowl::status::{Approval, Checks, ReviewState, Status};
 use uncurses::color::Profile;
 
 const REPO: &str = "acme/rocket";
@@ -54,7 +54,8 @@ fn open_pr(number: i64, title: &str, branch: &str) -> PrRow {
         is_draft: false,
         title: title.into(),
         branch: branch.into(),
-        mergeable: Mergeable::Ready,
+        approval: Approval::Approved,
+        conflicts: false,
         status: Some(Status::Pass),
         checks: checks(0, 0, 14),
         unresolved: 0,
@@ -117,7 +118,7 @@ fn sections() -> prowl::Sections {
                 )
             },
             PrRow {
-                mergeable: Mergeable::Blocked,
+                approval: Approval::Pending,
                 status: Some(Status::Fail),
                 checks: checks(1, 2, 11),
                 unresolved: 3,
@@ -129,14 +130,15 @@ fn sections() -> prowl::Sections {
                 )
             },
             PrRow {
-                mergeable: Mergeable::Conflicts,
+                approval: Approval::Pending,
+                conflicts: true,
                 status: Some(Status::Conflicts),
                 unresolved: 1,
                 updated_at: ago(260),
                 ..open_pr(
                     401,
-                    "refactor(status): collapse mergeability into a single glyph",
-                    "one-glyph",
+                    "refactor(status): split the open-PR glyph into approval and conflicts",
+                    "two-glyphs",
                 )
             },
             PrRow {

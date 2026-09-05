@@ -61,6 +61,9 @@ pub fn to_table(
         };
         let mut row = vec![
             render::change_marker(highlight.contains(&r.number), ascii),
+            // A blank glyph cell: every row here is merged, so there is no
+            // approval to report, but the PR column has to start where the
+            // open-PRs table starts.
             Cell::plain(" "),
             Cell::pr(r.number, r.url.clone(), status::fg(BLUE)),
             Cell::plain(r.title.clone()),

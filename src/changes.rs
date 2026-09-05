@@ -75,7 +75,8 @@ mod tests {
             is_draft: false,
             title: format!("PR {number}"),
             branch: format!("b/{number}"),
-            mergeable: crate::status::Mergeable::Ready,
+            approval: crate::status::Approval::Approved,
+            conflicts: false,
             status,
             checks: crate::status::Checks::default(),
             unresolved: 0,
@@ -143,9 +144,7 @@ mod tests {
 
     #[test]
     fn first_refresh_is_silent() {
-        let cur = Tracker::build(Some(&[pr(1, Some(Status::Fail))]), Some(&[merged(2)]));
         // No previous tracker -> default Changes -> nothing rings.
         assert!(!Changes::default().any());
-        let _ = cur;
     }
 }
